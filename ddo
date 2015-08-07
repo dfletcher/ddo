@@ -1,0 +1,2478 @@
+#!/bin/bash -i
+
+SCRIPTHOME="$HOME/.ddo"
+SCRIPTPATH=$0
+PROGRAM=$(basename ${0})
+REMOTE=0
+unset user
+[ -n "$USERNAME" ] && user="$USERNAME"
+[ -n "$USER" ] && user="$USER"
+
+#------------------------------------------------------------------------------
+# Utilities
+#------------------------------------------------------------------------------
+
+# ---------------------
+# get(varname, default)
+# ---------------------
+#
+# Utility: Syntax sugar to read variable and supply a default if it is not set.
+#
+# ARGS:  - varname: Variable name.
+#
+#        - default: Default value if ${!varname} is not set.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Variable value or default.
+#
+# VARS:    None
+#
+# DEPS:    None
+#
+# RETURN:  Unused (always resolves true).
+#
+# USAGE EXAMPLE:
+#
+#   unset VAR
+#   var=$(get VAR "default value")
+#   echo $var # "default value"
+#   VAR="my value"
+#   var=$(get VAR "default value")
+#   echo $var # "my value"
+#
+function get {
+  var="$1"
+  [ -n "${!var}" ] && printf "${!var}" || printf "$2"
+}
+
+function index {
+  var="$1"
+  deref="${!var}"
+  echo "var: ${deref[@]}" >> /dev/tty
+  [ -n "${!var[$2]}" ] && printf "${!var[$2]}" || printf "$3"
+}
+
+# ----------------------
+# repeat(ntimes, string)
+# ----------------------
+#
+# Utility: Repeat a string some specified number of times. To preserve
+# whitespace in output, quote the call: "$(repeat 5 ' hi ')".
+#
+# ARGS:  - ntimes: How many times to repeat the string. Must be an integer
+#                  value greater than zero.
+#
+#        - string: String to repeat.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Repeated string.
+#
+# VARS:    None
+#
+# DEPS:    None
+#
+# RETURN:  Unused (always resolves true).
+#
+# USAGE EXAMPLE:
+#
+#   repeat 5 "hello"        # "hellohellohellohellohello"
+#   repeat 5 "hello  "      # "hello hello hello hello hello"
+#   "$(repeat 5 'hello  ')" # "hello  hello  hello  hello  hello  "
+#
+function repeat {
+  # TODO: validate that $1 is an integer and is >= 0.
+  [ "$2" = $'\n' ] && v=$'\n ' || v="$2"
+  unset str
+  for i in $(seq 1 $1); do
+    str+="$v"
+  done
+  printf '%b' "$str"
+}
+
+# ------------------
+# loadserver(server)
+# ------------------
+#
+# Utility: Load server settings.
+#
+# ARGS:  - server: Server alias.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Unused
+#
+# VARS:    ${!server}_alias: Server alias.
+#          ${!server}_host: Server host.
+#          ${!server}_user: Server user.
+#          ${!server}_identity: Server identity.
+#          ${!server}_options: Server options.
+#
+# DEPS:    None
+#
+# RETURN:  0 if data successfully loaded, 1 otherwise (bash `if` compatible).
+#
+# USAGE EXAMPLE:
+#
+#     loadserver "${server}" ||
+#       fatal "Could not read server configuraion for '${server}'."
+#     identity=$(get $(ns ${server} _identity))
+#     user=$(get $(ns ${server} _user))
+#     host=$(get $(ns ${server} _host))
+#     opts=$(get $(ns ${server} _sshopts))
+#
+function loadserver {
+  file="$SCRIPTHOME/servers/${1}.server"
+  [ -f "$file" ] || return 1
+  . "$file" || return 1
+  n=$(ns ${1} _alias); export $n="${!n}"
+  n=$(ns ${1} _host); export $n="${!n}"
+  n=$(ns ${1} _user); export $n="${!n}"
+  n=$(ns ${1} _identity); export $n="${!n}"
+  n=$(ns ${1} _options); export $n="${!n}"
+  # TODO test required values and check alias against $1
+  return 0
+}
+
+# -------------------------------------------------------
+# ssh_pw_required(host, user, identity_file, ssh_options)
+# -------------------------------------------------------
+#
+# Utility: Test if a particular user@host requires a password for SSH access.
+#
+# ARGS:  - user: ssh username
+#
+#        - host: ssh host
+#
+#        - identity_file: ssh .pem identity file (-i) (optional). If a valid
+#          identity file is supplied this function returns false (nonzero).
+#
+#        - ssh_options: additional ssh options (optional).
+#
+# STDIN:   Unused
+#
+# STDOUT:  Unused
+#
+# VARS:    None
+#
+# DEPS:    ssh
+#
+# RETURN:  0 if password is required, 1 otherwise (bash `if` compatible).
+#
+# USAGE EXAMPLE:
+#
+#   ssh_pw_required "fletch" "mysite.com" &&
+#     echo "A password is required to login to mysite.com with user fletch."
+#
+function ssh_pw_required {
+  args="-n -o PasswordAuthentication=no"
+  [ -f "${3}" ] && args+=" -i ${3}"
+  [ -n "${4}" ] && args+=" ${4}"
+  args+=" -l ${2} ${1}"
+  ! ${SSH} $args 2> /dev/null # Invert to answer the question of the function.
+}
+
+# -----------------------
+# sshcmd(host, user, ...)
+# -----------------------
+#
+# Utility: Low level remote access function. Most code should use `remote`.
+# TODO: pass PROGRAM and COLUMNS to remote via (hidden?) command line switches.
+#
+# ARGS:  - host: SSH host.
+#
+#        - user: SSH username.
+#
+#        - ...: server commands and arguments, commands separated by "--".
+#
+# STDIN:   Unused
+#
+# STDOUT:  Remote command(s) output.
+#
+# VARS:    $IDENTITY_FILE: SSH .pem identity file (-i)
+#
+#          $SSH_OPTIONS: additional SSH options
+#
+# DEPS:    ssh
+#
+# RETURN:  0 if the command(s) succeeded or a nonzero error status otherwise.
+#
+# USAGE EXAMPLE:
+#
+#   sshcmd mysite.com fletch ping # Prints `uname -a` from the server.
+#
+function sshcmd {
+  host=$1; shift
+  user=$1; shift
+  identity=$(get IDENTITY_FILE)
+  options=$(get SSH_OPTIONS)
+  unset args
+  [ -f "$identity" ] && args+=" -i ${identity}"
+  [ -n "${options}" ] && args+=" ${options}"
+  args+=" -l ${user} ${host}"
+  args+=" S=\$(mktemp) &&"
+  args+=" cat - > \"\$S\" &&"
+  args+=" bash \$S --remote $@;"
+  args+=" E=\$?;"
+  args+=" rm \"\$S\";"
+  args+=" exit $E;"
+  ${SSH} $args < $SCRIPTPATH
+}
+
+# -------------------
+# remote(server, ...)
+# -------------------
+#
+# Utility: Remote access.
+#
+# ARGS:  - server: Server alias.
+#
+#        - ...: server commands and arguments, commands separated by "--".
+#
+# STDIN:   Unused
+#
+# STDOUT:  Remote command(s) output.
+#
+# VARS:    None
+#
+# DEPS:    ssh
+#
+# RETURN:  0 if the command(s) succeeded or a nonzero error status otherwise.
+#          255 if the specified server info could not be loaded.
+#
+# USAGE EXAMPLE:
+#
+#   remote mysite ping # Prints `uname -a` from the server.
+#
+function remote {
+  server="${1}"; shift
+  loadserver "${server}" || return 255
+  IDENTITY_FILE="$(get $(ns ${server} _identity))" \
+  SSH_OPTIONS="$(get $(ns ${server} _sshopts))" \
+    sshcmd "$(get $(ns ${server} _host))" "$(get $(ns ${server} _user))" "$@"
+}
+
+# -----------------------
+# prog(variable, program)
+# -----------------------
+#
+# Utility: Check for the existence of 'program'. If the program exists, this
+# function will export 'variable' to the path of the program and return 0 (bash
+# `if` compatible). If 'program' doesn't exist it returns 1 and exports nothing.
+#
+# ARGS:  - variable: Name of a variable to export.
+#
+#        - program: Program to check for.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Unused
+#
+# VARS:    None
+#
+# DEPS:    None
+#
+# RETURN:  0 if the program exists, 1 otherwise (bash `if` compatible).
+#
+# USAGE EXAMPLES:
+#
+#   prog ENV env || fatal "NO ENV HOLY CRAP WHATDO!"
+#   echo ENV: $ENV
+#
+function prog {
+  cmd="$(command -v $2)"
+  [ ! -f "$cmd" ] && cmd="$(which $2)" # $(command) doesn't work when alias.
+  [ ! -f "$cmd" ] && return -1 # $(command) and $(which) failed, bail.
+  [ -x "$cmd" ]
+  rval=$?
+  [ $rval ] && export $1="$(command -v $2)"
+  return $rval
+}
+
+# ------------------------------
+# func(function)
+# ------------------------------
+#
+# Utility: Test if local function is defined.
+#
+# ARGS:  - function: Function name to check for.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Unused
+#
+# VARS:    None
+#
+# DEPS:    None
+#
+# RETURN:  0 if the function exists, 1 otherwise (bash `if` compatible).
+#
+# USAGE EXAMPLES:
+#
+#   if func $(ns $COMMAND _myhook); then
+#     $(ns $COMMAND _myhook) arg arg arg
+#   fi
+#
+function func {
+#  [ "$(type -t $1)" = "function" ]
+  local -f $1 > /dev/null
+  return $?
+}
+
+# -------
+# ns(...)
+# -------
+#
+# Utility: Squeeze arguments together to make a namespaced function or variable
+# name. Used to build dynamic names.
+#
+# ARGS:  - ... names to concatinate.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Generated function name.
+#
+# VARS:    None
+#
+# DEPS:    sed
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLES:
+#
+#    $(ns "n" "s")                              -->  `ns`
+#    $(ns "ns") arg arg arg                     -->  argargarg
+#    $(ns "n" "s") arg arg arg                  -->  argargarg
+#    $(ns "echo") arg arg arg                   -->  arg arg arg
+#    $(ns "ec" "ho") arg arg arg                -->  arg arg arg
+#    echo "++ $($(ns "n" "s") arg arg arg) ++"  -->  ++ argargarg ++
+#    echo "++ `$(ns "n" "s") arg arg arg` ++"   -->  ++ argargarg ++
+#
+function ns {
+  ${SED} "s/\s//g" <<< "$@"
+}
+
+# -------------
+# tableformat()
+# -------------
+#
+# Utility: Format a table.
+#
+# ARGS:    None
+#
+# STDIN:   Stream of line(s) containing records. Cells are separated with a
+#          "|" character. A row can consist of a single "-", "_", or "="
+#          character which will be replaced with a separator line. Blank lines
+#          are ignored. Extra whitespace around cell values is removed and
+#          multiple spaces in the cell value are replaced with one.
+#
+# STDOUT:  Formatted table.
+#
+# VARS:    $WIDTH: Width of the table. Actual width of the table will be
+#          smaller than this value by (MARGIN*2). The default value is
+#          $COLUMNS if that variable is set, or 80 if not.
+#
+#          $MARGIN: Spaces to the left and right of the table. Default is 5.
+#
+#          $SEPARATOR: Character to separate records in input. Default is "|".
+#
+#          $ROWSPACING: Add space between rows. Default is 0.
+#
+#          $OPTIONS: 'Global options' from `tbl`. See `man tbl` for details.
+#
+#          $FORMAT: Table format specification from `tbl` for table body rows.
+#          See `man tbl` for details.
+#
+#          $HEADER_FORMAT: Table format specification from `tbl` for the table
+#          header row. See `man tbl` for details.
+#
+#          $OUTPUT_MODE: 'ascii' or 'utf8'. Default is utf8 which makes nicer
+#          borders and bold/italics but may not work everywhere.
+#
+# DEPS:    sed tr tbl groff
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLES:
+#
+#   ---------
+#   Example 1
+#   ---------
+#
+#   echo -e "\n"
+#   FORMAT="l lx" tableformat <<EOF
+#     Arguments|
+#
+#     --someoption,-s | This is an option value with a really really long \
+#                       description. It just keeps going. You know I think I \
+#                       write more documentation and help strings than actual \
+#                       code.
+#
+#     --another,-a    | Another option let's make a nice table.
+#   EOF
+#
+#   # ... outputs ...
+#
+#     Arguments
+#
+#     --someoption,-s   This  is  an option value with a really really long
+#                       description. It just keeps going. You know I  think
+#                       I  write  more  documentation and help strings than
+#                       actual code.
+#
+#     --another,-a      Another option let’s make a nice table.
+#
+#   ---------
+#   Example 2
+#   ---------
+#
+#   FORMAT="l|lx" HEADER_FORMAT="lb|lb" tableformat <<EOF
+#     Abc|Def
+#     _
+#     --someoption,-s | This is an option value with a really really long \
+#                       description. It just keeps going. You know I think I \
+#                       write more documentation and help strings than actual \
+#                       code.
+#     --another,-a    | Another option let's make a nice table. \
+#                       `printf " well hello there%.s" {1..30}`
+#   EOF
+#
+#   # ... outputs ...
+#
+#     Abc             │ Def
+#     ────────────────┼─────────────────────────────────────────────────────
+#     --someoption,-s │ This  is  an option value with a really really long
+#                     │ description. It just keeps going. You know I  think
+#                     │ I  write  more  documentation and help strings than
+#                     │ actual code.
+#     --another,-a    │ Another option let’s make a nice table. well  hello
+#                     │ there  well hello there well hello there well hello
+#                     │ there well hello there well hello there well  hello
+#                     │ there  well hello there well hello there well hello
+#                     │ there well hello there well hello there well  hello
+#                     │ there  well hello there well hello there well hello
+#                     │ there well hello there well hello there well  hello
+#                     │ there  well hello there well hello there well hello
+#                     │ there well hello there well hello there well  hello
+#                     │ there  well hello there well hello there well hello
+#                     │ there well hello there well hello there
+#
+#   ---------
+#   Example 3
+#   ---------
+#
+#   OPTIONS="allbox" FORMAT="cw3 cw3 cw3" tableformat <<EOF
+#     a | b | c
+#     d | e | f
+#     g | h | i
+#   EOF
+#
+#   # ... outputs ...
+#
+#     ┌────┬─────┬─────┐
+#     │ a  │  b  │  c  │
+#     ├────┼─────┼─────┤
+#     │ d  │  e  │  f  │
+#     ├────┼─────┼─────┤
+#     │ g  │  h  │  i  │
+#     └────┴─────┴─────┘
+#
+function tableformat {
+
+  # Variables init.
+  ncolumns=0
+  unset body
+  tab="`echo -e "\t"`"
+  margin=$(get MARGIN 5)
+  width=$(get WIDTH $(get COLUMNS 80))
+  width=$(($width-$margin-$margin-1))
+  rowspacing="$(repeat $(get ROWSPACING 0) $'\n')"
+  sep=$(get SEPARATOR '|')
+  mode=$(get OUTPUT_MODE utf8)
+
+  # Read records from stdin. Count columns.
+  while IFS="$sep" read -a a; do
+    [ ${#a[@]} = 0 ] && continue
+    i=0
+    for field in "${a[@]}"; do
+      # TODO figure out how to get rid of `echo -e` here.
+      i=$((i+1))
+      v="$(echo -e "${field}" | ${SED} -e 's/^[[:space:]]*//' \
+         -e 's/[[:space:]]*$//' | ${TR} -s ' ')"
+      [ -z "${v}" ] && continue
+      [ $i -gt 1 ] && body+="${tab}"
+      [ ${#v} = 1 ] &&
+        body+="${v}${rowspacing}" ||
+        body+=$'T{\n'"${v}${rowspacing}"$'\nT}'
+    done
+    body+=$'\n'
+    ncolumns=$(($i>$ncolumns?$i:$ncolumns))
+  done
+
+  # Format strings.
+  header=".ll ${width}m"$'\n'
+  header+=".po ${margin}m"$'\n'
+  header+=$'.pl 999999\n'
+  header+=$'.TS\n'
+  [ -n "$OPTIONS" ] && header+="$OPTIONS"$';\n'
+  [ -n "$HEADER_FORMAT" ] && header+="$HEADER_FORMAT"$'\n'
+  [ -n "$FORMAT" ] && \
+    header+="$FORMAT"$'.\n' || \
+    header+="$(repeat $ncolumns 'lex ')"$'.\n'
+  footer=$'.TE'
+  footer+=$'\n.pl \\n[nl]u'
+  fmtstr="${header}${body}${footer}"
+
+  # Use `tbl | groff` for formatting. `grotty` seems to have a spurious error
+  # sometimes so /dev/null STDERR on groff (which calls grotty).
+  #echo "${fmtstr}"
+  ${TBL} <<< "${fmtstr}" | ${GROFF} "-T${mode}" 2>/dev/null
+}
+
+# -----------
+# paragraph()
+# -----------
+#
+# Utility: Format paragraphs.
+#
+# ARGS:    None
+#
+# STDIN:   [ TODO DOCUMENT ME ]
+#
+# STDOUT:  Formatted paragraph.
+#
+# VARS:    [ TODO DOCUMENT ME ]
+#
+# DEPS:    sed tr tbl groff
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLE:
+#
+#   [ TODO DOCUMENT ME ]
+#
+function paragraph {
+  SEPARATOR="" MARGIN="$(get MARGIN 3)" ROWSPACING=1 tableformat
+}
+
+# -------
+# usage()
+# -------
+#
+# Utility: Display program usage.
+#
+# ARGS:    None
+#
+# STDIN:   Unused
+#
+# STDOUT:  Usage message.
+#
+# VARS:    $PROGRAM: The program name as specified in $0 of the script.
+#
+#          $COMMANDS: Input, global list of commands.
+#
+# DEPS:    sed tr tbl groff
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLES:
+#
+#    usage; exit 0
+#
+function usage {
+  unset helpdata
+  for cmd in $COMMANDS; do
+    helpdata+="$cmd|$($(ns shorthelp_ $cmd))"$'\n'
+  done
+  echo -e "Usage: $PROGRAM [GLOBAL ARGUMENTS] COMMAND (COMMAND ARGUMENTS) [-- COMMAND (COMMAND ARGUMENTS)]...\n"
+  FORMAT="llx" MARGIN="3" tableformat <<EOF
+    GLOBAL ARGUMENTS
+    _
+    -y,--yes       | Automatically answer \"y\" to yes/no questions and \
+                     accept the default value for other types of questions. \
+                     Does not work for all commands.
+    -a,--ascii     | If your terminal is displaying odd characters when \
+                     running \`$PROGRAM\` it may not support utf8, try this.
+    COMMANDS
+    _
+    $helpdata
+    help [COMMAND] | Display help for a specific command.
+EOF
+  [[ -n "$1" ]] && echo "ERROR: $1."
+}
+
+# --------------------
+# fatal(...)
+# --------------------
+#
+# Utility: print an fatal and exit
+#
+# ARGS:  - ...: Messages to display regarding what went wrong.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Usage message.
+#
+# VARS:    $EXITCODE: Code to exit with. Default is 1.
+#
+# DEPS:    sed tr tbl groff
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLES:
+#
+#    fatal "Something went wrong! (details ...)"
+#
+function fatal {
+  exitcode=$(get EXITCODE 1)
+  echo -e "$*" | paragraph > /dev/stderr
+  exit $exitcode
+}
+
+# ------------------------
+# longhelp(command, usage)
+# ------------------------
+#
+# Utility: Format command specific help.
+#
+# ARGS:  - command: Command we're giving long help for.
+#
+#        - usage: Usage string.
+#
+# STDIN:   Detailed help text.
+#
+# STDOUT:  Formatted help message.
+#
+# VARS:    None
+#
+# DEPS:    sed tr tbl groff
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLES:
+#
+#   longhelp $1 "$PROGRAM delserver [SERVERNAME]" <<EOL
+#     Delete a server by alias.
+#   EOL
+#
+function longhelp {
+
+  command="$1"
+  shift
+
+  while [ -n "$1" ]; do
+    echo "$1" | sed 's/^/   /'
+    shift
+  done
+
+  echo
+  FORMAT="lw8lx" HEADER_FORMAT="lb" tableformat <<EOF
+    Synopsis
+    _
+    Command: | $command
+    Summary: | $($(ns shorthelp_ $command))
+EOF
+
+  echo
+  # TODO cat below isn't working right, or tableformat isn't normalizing space
+  # right. Also TODO, add a table debugging program switch.
+  FORMAT="lx" HEADER_FORMAT="lb" tableformat <<EOF
+    Details
+    _
+    `cat`
+EOF
+
+}
+
+# TODO docs!
+# argshelp(command, usage)
+function argshelp {
+  command="$1"
+  shift
+  config=$(ns $command _CONFIG)
+  config="${!config}"
+  unset helplines
+  while read_array a; do
+    [ -z "${a[4]}" ] && [ -z "${a[5]}" ] && continue
+    [ -n "${a[4]}" ] && helplines+="${a[4]}"
+    [ -n "${a[4]}" ] && [ -n "${a[5]}" ] && helplines+=","
+    [ -n "${a[5]}" ] && helplines+="${a[5]}"
+    helplines+="|${a[6]}"$'\n'
+  done <<< "$config"
+  while [ -n "$1" ]; do
+    echo "$1" | sed 's/^/   /'
+    shift
+  done
+  echo
+  FORMAT="lw18 lx" HEADER_FORMAT="lb" tableformat <<EOF
+    Arguments
+    _
+    $helplines
+EOF
+  longhelp "$command"
+}
+
+# ------------------------
+# valid_command(command)
+# ------------------------
+#
+# Utility: Test if given command is NOT in the command list.
+#
+# ARGS:  - command: Command to test for.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Unused
+#
+# VARS:    $COMMANDS: Input, global list of commands.
+#
+# RETURN:  0 if the command is valid, 1 otherwise (bash `if` compatible).
+#
+# USAGE EXAMPLES:
+#
+#   if ! valid_command $COMMAND; then
+#     usage "Unknown command \"$COMMAND\""; exit -2;
+#   fi
+#
+function valid_command {
+  [[ "$COMMANDS" =~ (^| )"$1"($| ) ]]
+  return $?
+}
+
+# -------------------------
+# valid_number(min, max, n)
+# -------------------------
+#
+# Utility: Check if a number is valid and in a given range.
+#
+# ARGS:  - min: Minimum value.
+#
+#        - max: Maximum value.
+#
+#        - n: String to test.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Unused
+#
+# VARS:    None
+#
+# RETURN:  0 if the number is valid, 1 otherwise (bash `if` compatible).
+#
+function valid_number {
+  [[ -n "$3" ]] && \
+    [[ "$3" =~ ^[0-9]+$ ]] && \
+    [[ $3 -ge $1 ]] && \
+    [[ $3 -lt $2 ]] && \
+    return 0
+  return 1
+}
+
+#------------------------------------------------------------------------------
+# UI: basic prompts
+#------------------------------------------------------------------------------
+
+# -------------------------------
+# prompt(resultvar, message, ...)
+# -------------------------------
+#
+# Utility: Similar to the bash built-in `read` function.
+#
+# Note this function DOES NOT implement the promptfn interface of multiprompt.
+# It is a lower level utility and promptfn implementations can be build using
+# this as a utility.
+#
+# ARGS:  - resultvar: Variable to store user input result.
+#
+#        - message: Prompt message.
+#
+#        - ...: Remaining arguments contain valid values. If additional
+#          args are given, the user input is required to conform. If no
+#          additional arguments are given, the input is unconstrained and
+#          may be empty.
+#
+# STDIN:   Read user input.
+#
+# STDOUT:  Prompt message.
+#
+# VARS:    ${!resultvar} [OUT]: Output variable set to user input.
+#
+#          $DEFAULT [IN]: Value to pass as default to read.
+#
+#          $SILENT [IN]: Set to any nonempty value to use silent mode.
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLES:
+#
+#   prompt name "What's your name?"
+#   echo "Well hello, ${name}."
+#
+#   prompt ynresult "Do you like fruit? (y/n)" "y" "n"
+#   [[ $ynresult = y ]] && echo "Great, fruit is good for you." \
+#      || echo "You really should get out more often."
+#
+function prompt {
+  # TODO better result regex handling? do we need it? and docs for it.
+  resultvar=$1
+  message=$2
+  shift; shift
+  result=""
+  [ -n "${SILENT}" ] && silent="-s" || silent=""
+  [ -n "${DEFAULT}" ] && default="-i${DEFAULT}" || default=""
+  if [[ -n "$*" ]]; then
+    while [[ ! "$@" =~ (^| )"$result"($| ) ]]; do
+      read ${silent} ${default} -ep "$message: " result
+    done
+  else
+    read ${silent} ${default} -ep "$message: " result
+  fi
+  [ -n "${SILENT}" ] && echo
+  export $resultvar="$result"
+}
+
+# -------------------------------------
+# ynprompt(resultvar, message, default)
+# -------------------------------------
+#
+# Utility: Standard yes/no prompt.
+#
+# Implements the promptfn interface for multiprompt.
+#
+# See multiprompt() / STDIN / [column 1] promptfn for details.
+#
+# ARGS:  - resultvar: Variable to store user input result.
+#
+#        - message: Prompt message.
+#
+#        - default: Optional default value if user presses [ENTER].
+#
+# STDIN:   Read user input.
+#
+# STDOUT:  Prompt message.
+#
+# VARS:    ${!resultvar}: Output variable set to user input.
+#
+# RETURN:  0 if the user selected 'y', 1 otherwise (bash `if` compatible).
+#
+# USAGE EXAMPLES:
+#
+#   ynprompt ynresult "Do you like fruit?"
+#   [[ $ynresult = y ]] && echo "Great, fruit is good for you." \
+#      || echo "You really should get out more often."
+#
+function ynprompt {
+  echo
+  [ -n "${3}" ] &&
+    DEFAULT="${3}" prompt ynresult "${2} (y/n)" "y" "n" ||
+    prompt ynresult "${2} (y/n)" "y" "n"
+  export $1=$ynresult
+  [ "${ynresult}" = "y" ]
+}
+
+function textprompt {
+  echo
+  f="${1}"
+  v="${!f}"
+  IFS="^?" DEFAULT="${v}" prompt v "${2}"
+  [ -n "${v}" ] && export $1="${v}"
+}
+
+function pwprompt {
+  echo
+  while : ; do
+    SILENT="1" prompt prompt1 "${2}"
+    SILENT="1" prompt prompt2 "${2} (again)"
+    [ "$prompt1" = "$prompt2" ] &&
+      break ||
+      echo "Passwords do not match, please try again."
+  done
+  export $1="${prompt1}"
+}
+
+# -----------------------
+# read_filtered(variable)
+# -----------------------
+#
+# Utility: A wrapper around bash's built-in read with a few extra features:
+#
+#  * Removes lines that contain only a comment.
+#  * Removes empty lines.
+#  * Removes comments from the end of lines.
+#  * Trims extra whitespace from the start and end of lines.
+#
+# ARGS:  - variable: Name of variable to set with the read results.
+#
+# STDIN:   Stream of line(s) to read.
+#
+# STDOUT:  Unused
+#
+# VARS:  - ${!variable}: Output variable set to line that was read.
+#
+#        - $PREPROCESS: Input - Name of a function to call to rewrite valid
+#          lines. PREPROCESS(line). If specified, function should `echo` the
+#          altered line.
+#
+#        - $PREFIX: Input - Text to insert before valid input lines. Alternate
+#          way to do similar as PREPROCESS without writing a separate function.
+#
+# RETURN:  Similar to bash build-in read function: zero on success, non-zero
+#          value on error or EOF.
+#
+# USAGE EXAMPLES:
+#
+#   TODO
+#
+function read_filtered {
+  export $1=""
+  while : ; do
+    read -r line
+    rval=$?
+    # Handle EOF.
+    [[ $rval != 0 ]] && break
+    # Remove comment lines.
+    [[ -z "`grep -ve \"^[\s]*#\" <<< \"$line\"`" ]] && continue
+    # Remove empty lines.
+    [[ -z $line ]] && continue
+    # End of line comments.
+    line="`sed "s/\#[^$]*$//g" <<< \"$line\"`"
+    # Trim whitespace at start and end.
+    line="`sed \"s/^\s+//g\" <<< "$line" | sed \"s/\s+$//g\"`"
+    [[ -n "$PREPROCESS" ]] && line=`$PREPROCESS "$line"`
+    [[ -n "$PREFIX" ]] && line="$PREFIX $line"
+    export $1="$line"
+    break
+  done
+  # Return value from read call.
+  return $rval
+}
+
+# --------------------
+# read_array(variable)
+# --------------------
+#
+# Utility: Similar to read_filtered but reads data into an array of values.
+#
+# ARGS:  - variable: Name of variable to set with array results.
+#
+# STDIN:   Stream of line(s) to read.
+#
+# STDOUT:  Unused
+#
+# VARS:  - ${!variable}: Output variable to hold array result.
+#
+#        - $PREPROCESS: Input - Name of a function to call to rewrite valid
+#          lines. PREPROCESS(line). If specified, function should `echo` the
+#          altered line.
+#
+#        - $PREFIX: Input - Text to insert before valid input lines. Alternate
+#          way to do similar as PREPROCESS without writing a separate function.
+#
+#        - $SEPARATOR: Input - Column separator that delineates array items.
+#          Default if not specified is "|".
+#
+# RETURN:  Similar to bash build-in read function: zero on success, non-zero
+#          value on error or EOF.
+#
+# USAGE EXAMPLES:
+#
+#   TODO
+#
+function read_array {
+  variable="$1"
+  [[ -n "$SEPARATOR" ]] && sep="$SEPARATOR" || sep="|"
+  # Based on read_filtered.
+  read_filtered line
+  rval=$?
+  # Handle EOF.
+  [[ $rval != 0 ]] && return $rval
+  # Trim whitespace around separator.
+  line="`sed \"s/\s*$sep\s*/$sep/g\" <<< \"$line\"`"
+  # Parse array.
+  IFS="$sep" read -a "$variable" <<< "$line"
+  # Return value from read_filtered call.
+  return $rval
+}
+
+# ---------------------------------------------
+# display(fieldname, label, prompt_message)
+# ---------------------------------------------
+#
+# Standard default displayfn() implementation for multiprompt.
+#
+# See multiprompt() / STDIN / [column 2] displayfn for details.
+#
+# ARGS:  - fieldname: Name of field.
+#
+#        - label: Label for use in list display function.
+#
+#        - prompt_message: The prompt message.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Display "FIELDNAME: VALUE" or "FIELDNAME" if value not set.
+#
+# VARS:    None
+#
+# RETURN:  Unused
+#
+function display {
+  [ -n "${!1}" ] && echo "${2}: ${!1}" || echo "${2}"
+}
+
+# -------------------------------
+# multiprompt(title, num_columns)
+# -------------------------------
+#
+# Display a menu of choices to user, enabling them to change value by number.
+# How list items are displayed and how the data is collected from the user are
+# controlled by the field data descibed below in STDIN.
+#
+# ARGS:  - title: Text to show above the option listing.
+#
+#        - num_columns: Number of columns in the listing. Optional. Default=3.
+#
+# STDIN:   Rows of field records. Columns are separated with "|" by default
+#          and rows are separated with a newline character. Lines starting with
+#          a '#' character are ignored. Empty lines are ignored. Comments at
+#          the end of line starting with '#' and continuing to end of line are
+#          removed. Data table format:
+#
+#              [column 1] promptfn
+#              -------------------
+#              SIG:  promptfn(fieldname, prompt_message, label)
+#              VARS: fields (array), labels (array), promptfns (array),
+#                    displayfns (array), promptmessages (array),
+#                    i (selected index).
+#              Prompt function called to change an item value. This function
+#              should ask for user input if needed and export the field value.
+#
+#              [column 2] displayfn
+#              --------------------
+#              SIG:  displayfn(fieldname, label, prompt_message)
+#              VARS: fields (array), labels (array), promptfns (array),
+#                    displayfns (array), promptmessages (array),
+#                    i (selected index).
+#              Display function should `echo` the item for display in list
+#              mode. Keep the text short to work with the given # columns.
+#
+#              [column 3] default
+#              ------------------
+#              Default value for the field. It will only be applied if the
+#              variable of the field doesn't already contain a value.
+#
+#              [column 4] fieldname
+#              --------------------
+#              Name of the field. Must be a single word name, it is used as
+#              bash variable name.
+#
+#              [column 5] label
+#              ----------------
+#              Short label for the field. Normally used in list mode, `echo`d
+#              by the displayfn.
+#
+#              [column 6] promptmessage
+#              ------------------------
+#              Message to display when prompting for a value. Normally used
+#              in prompt mode, `echo`'d by the promptfn.
+#
+# STDOUT:  Interactive.
+#
+# VARS:  - Each field is exported as a variable with the user configured value.
+#
+#        - $fields: Output array of field names that were processed.
+#
+#        - $labels: Output array of labels corresponding to the fields list.
+#
+#        - $INIT: Input - specify a function to run after parsing STDIN data
+#          but before displaying list for the first time. Init functions have
+#          access to the following vars: fields (array), labels (array),
+#          promptfns (array), displayfns (array), promptmessages (array).
+#
+#        - $PREPROCESS: Input - Name of a function to call to rewrite valid
+#          lines. PREPROCESS(line). If specified, function should `echo` the
+#          altered line.
+#
+#        - $PREFIX: Input - Text to insert before valid input lines. Alternate
+#          way to do similar as PREPROCESS without writing a separate function.
+#
+#        - $PROMPT: Input - Message displayed during item selection. Default
+#          is "Choose item or press [ENTER] to confirm"
+#
+#        - $SEPARATOR: Input - Column separator that delineates array items.
+#          Default if not specified is "|".
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLE:
+#
+#  multiprompt "Fruity multiprompt" 4 <<EOF
+#    # promptfn | displayfn   | dflt | fieldname | label    | promptmessage
+#    # ---------+-------------+------+-----------+----------+-----------------
+#      ynprompt | cboxdisplay | n    | cherries  | Cherries | Include cherries
+#      ynprompt | cboxdisplay | n    | oranges   | Oranges  | Include oranges
+#      ynprompt | cboxdisplay | n    | pears     | Pears    | Include pears
+#      ynprompt | cboxdisplay | y    | lemons    | Lemons   | Include lemons
+#      ynprompt | cboxdisplay | n    | limes     | Limes    | Include limes
+#  EOF
+#  for f in ${fields[@]}; do echo "$f: ${!f}"; done
+#
+# Note that this is a contrived example showing the features of multiprompt().
+# See checkboxprompt or radioprompt for a better way to handle single on/off
+# values and for examples how to extend this function with a simpler interface.
+#
+# See STDIN above for column definitions.
+#
+function multiprompt_Xxx {
+  # Note: _multiprompt is run in a subshell because it recurses and bash has
+  # an odd behavior where locals are overwritten during the recursion. We
+  # capture output of _multiprompt which is a list of vars, and evaluate it.
+  eval "$(_multiprompt "$1" "$2")"
+}
+
+function multiprompt {
+  local -a multiprompt_fields
+  local -a multiprompt_labels
+  local -a multiprompt_promptfns
+  local -a multiprompt_displayfns
+  local -a multiprompt_promptmsgs
+  n=1
+  while read_array a; do
+    multiprompt_promptfns[$n]="${a[0]}"
+    multiprompt_displayfns[$n]="${a[1]}"
+    multiprompt_fields[$n]="${a[3]}"
+    multiprompt_labels[$n]="${a[4]}"
+    multiprompt_promptmsgs[$n]="${a[5]}"
+    if [[ -z "${!a[3]}" ]]; then # Value not already set.
+      if [[ "${a[2]}" = "=PROMPT" ]]; then
+        # Magic value "=PROMPT" so promp user now.
+        ${a[0]} "${a[3]}" "${a[5]}" "${a[4]}" </dev/tty
+      else
+        # Otherwise just set the default value.
+        export ${a[3]}="${a[2]}"
+      fi
+    fi
+    n=$((n+1))
+  done
+  [[ -n "${INIT}" ]] && ${INIT}
+  while : ; do
+    n=1
+    valid_number 1 64 ${2} && ncolumns=${2} || ncolumns=3
+    table=""
+    for field in ${multiprompt_fields[@]}; do
+      display="`${multiprompt_displayfns[$n]} ${field} \"${multiprompt_labels[$n]}\" \"${multiprompt_promptmsgs[$n]}\"`"
+      table+="|`printf \"%3s %s\" \"${n}.\" \"${display}\"`"
+      ((n % ${ncolumns} == 0)) && table+=$'\n'
+      n=$((n+1))
+    done
+    printf $'\n%s:\n\n' "${1}" >> /dev/tty
+    column -t -s "|" <<< "$table" >> /dev/tty
+    pmsg="$(get PROMPT 'Choose item or [ENTER] to confirm')"
+    echo >> /dev/tty; prompt i "${pmsg}" </dev/tty >> /dev/tty
+    [[ -z "$i" ]] && break # [ENTER] exits the loop
+    if ! valid_number 1 $n "$i"; then
+      echo >> /dev/tty
+      echo "Sorry I don't understand \"$i\". Please select one of the" \
+           "displayed items or press [ENTER] to confirm." >> /dev/tty
+      continue
+    fi
+    # Execute prompt function in a subshell so if we recurse back to
+    # multiprompt the locals here are not affected.
+    ${multiprompt_promptfns[$i]} "${multiprompt_fields[$i]}" "${multiprompt_promptmsgs[$i]}" "${multiprompt_labels[$i]}" </dev/tty >>/dev/tty
+  done
+  declare -n fields=multiprompt_fields
+  declare -n labels=multiprompt_labels
+
+}
+# Hack, can't export globals so have to declare here and unset before using.
+declare -a fields
+declare -a labels
+
+# ------------------------------
+# argsprompt(title, num_columns)
+# ------------------------------
+#
+# Display a menu of choices to user, enabling them to change value by number.
+# How list items are displayed and how the data is collected from the user are
+# controlled by the field data descibed below in STDIN.
+#
+# ARGS:  - title: Text to show above the option listing.
+#
+#        - num_columns: Number of columns in the listing. Optional. Default=3.
+#
+# STDIN:   Rows of field records. Columns are separated with "|" by default
+#          and rows are separated with a newline character. Lines starting with
+#          a '#' character are ignored. Empty lines are ignored. Comments at
+#          the end of line starting with '#' and continuing to end of line are
+#          removed. Data table format:
+#
+#              [column 0] fieldname
+#              -------------------
+#              Name of field used as variable name containing result.
+#
+#              [column 1] default
+#              --------------------
+#              Default value. May be one of the following special values:
+#
+#                =REQUIRED - Bail if value is not supplied on the command line.
+#
+#                =PROMPT - Prompt if value is not supplied on the command line.
+#
+#              [column 2] label
+#              ----------------
+#              Short legible label for the field.
+#
+#              [column 3] description
+#              ------------------------
+#              More detailed description dislpayed in help message.
+#
+# STDOUT:  Interactive.
+#
+#                        ----- TODO FIX DOCS BELOW THIS MARK -----
+#
+# VARS:  - Each field is exported as a variable with the user configured value.
+#
+#        - $fields: Output array of field names that were processed.
+#
+#        - $labels: Output array of labels corresponding to the fields list.
+#
+#        - $INIT: Input - specify a function to run after parsing STDIN data
+#          but before displaying list for the first time. Init functions have
+#          access to the following vars: fields (array), labels (array),
+#          promptfns (array), displayfns (array), promptmessages (array).
+#
+#        - $PREPROCESS: Input - Name of a function to call to rewrite valid
+#          lines. PREPROCESS(line). If specified, function should `echo` the
+#          altered line.
+#
+#        - $PREFIX: Input - Text to insert before valid input lines. Alternate
+#          way to do similar as PREPROCESS without writing a separate function.
+#
+#        - $PROMPT: Input - Message displayed during item selection. Default
+#          is "Choose item or press [ENTER] to confirm"
+#
+#        - $SEPARATOR: Input - Column separator that delineates array items.
+#          Default if not specified is "|".
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLE:
+#
+#  multiprompt "Fruity multiprompt" 4 <<EOF
+#    # promptfn | displayfn   | dflt | fieldname | label    | promptmessage
+#    # ---------+-------------+------+-----------+----------+-----------------
+#      ynprompt | cboxdisplay | n    | cherries  | Cherries | Include cherries
+#      ynprompt | cboxdisplay | n    | oranges   | Oranges  | Include oranges
+#      ynprompt | cboxdisplay | n    | pears     | Pears    | Include pears
+#      ynprompt | cboxdisplay | y    | lemons    | Lemons   | Include lemons
+#      ynprompt | cboxdisplay | n    | limes     | Limes    | Include limes
+#  EOF
+#  for f in ${fields[@]}; do echo "$f: ${!f}"; done
+#
+# Note that this is a contrived example showing the features of multiprompt().
+# See checkboxprompt or radioprompt for a better way to handle single on/off
+# values and for examples how to extend this function with a simpler interface.
+#
+# See STDIN above for column definitions.
+#
+function argsprompt {
+
+  # Variables init.
+  title="$1"; shift
+  num_columns="$1"; shift
+  promptfn=$(get PROMPTFN textprompt)
+  displayfn=$(get DISPLAYFN display)
+
+  unset config
+  unset __fields
+  unset __labels
+  unset required
+  unset prompts
+  unset longopts
+  unset shortopts
+  unset inputdata
+  local -a __fields
+  local -a __labels
+  local -a required
+  local -a prompts
+  local -a longopts
+  local -a shortopts
+
+  # Parse the config and build approriate string for multiprompt.
+  while read_array a; do
+    unset dflt
+    __fields[${#__fields[@]}]="${a[0]}"
+    __labels[${#__labels[@]}]="${a[2]}"
+    case "${a[1]}" in
+      "=PROMPT")
+        if [ "${GROUP}" = "${a[7]}" ]; then
+          required[${#required[@]}]="${a[0]}"
+          prompts[${#prompts[@]}]="${a[0]}"
+        fi
+        dflt="=PROMPT"
+      ;;
+      "=REQUIRED")
+        [ "${GROUP}" = "${a[7]}" ] && required[${#required[@]}]="${a[0]}"
+      ;;
+      *)
+        [ -z "${!a[0]}" ] && export ${a[0]}="${a[1]}"
+        dflt="${a[1]}"
+      ;;
+    esac
+    if [ "${GROUP}" = "${a[7]}" ]; then
+      longopts[${#longopts[@]}]="${a[4]}"
+      shortopts[${#shortopts[@]}]="${a[5]}"
+      [ -n "${a[8]}" ] && pfn="${a[8]}" || pfn="${promptfn}"
+      [ -n "${a[9]}" ] && dfn="${a[9]}" || dfn="${displayfn}"
+      config+="${pfn}|${dfn}|${dflt}|${a[0]}|${a[2]}|${a[3]}"$'\n'
+    fi
+  done
+
+  # Parse arguments.
+  while : ; do
+    [[ -z "$1" ]] && break
+    i=0
+    handled=0
+    while : ; do
+      case "$1" in
+        "${longopts[$i]}")
+          export ${__fields[$i]}=$2
+          shift; shift
+          handled=1
+        ;;
+        "${shortopts[$i]}")
+          export ${__fields[$i]}=$2
+          shift; shift
+          handled=2
+        ;;
+        ${longopts[$i]}=*)
+          export ${__fields[$i]}="`sed \"s/${longopts[$i]}=//g\" <<< \"$1\"`"
+          shift
+          handled=3
+        ;;
+        ${shortopts[$i]}=*)
+          export ${__fields[$i]}="`sed \"s/${shortopts[$i]}=//g\" <<< \"$1\"`"
+          shift
+          handled=4
+        ;;
+      esac
+      i=$((i+1))
+      [ $handled != 0 ] && break
+      [ "$i" -ge "${#__fields[@]}" ] && break
+    done
+    [ $handled = 0 ] && fatal "bad arg: '$1'" # TODO better error handling
+  done
+
+  # Check if we have all required fields and no fields requiring prompt.
+  if test ${#prompts[@]} = 0 -a ${#required[@]} -gt 0 -a -z "${GROUP}"; then
+    # Prompts array is empty.
+    hasrequired=1
+    for field in ${required[@]}; do
+      if [ -n "${!field}" ]; then
+        # Required field has a value, keep checking.
+        continue
+      else
+        # Required field has no value, stop checking.
+        hasrequired=0
+        break
+      fi
+    done
+    [ $hasrequired = 1 ] && return 0 # Early exit all required fields supplied.
+  fi
+
+  # Prompt.
+  while : ; do
+    PREFIX="" PREPROCESS="" multiprompt "${title}" "${num_columns}" <<< "$config"
+    for field in ${required[@]}; do
+      [ -z "${!field}" ] && continue 2
+    done
+    break
+  done
+
+  fields=${__fields[@]}
+  labels=${__labels[@]}
+}
+
+#------------------------------------------------------------------------------
+# UI: checkboxes
+#------------------------------------------------------------------------------
+
+# --------------------
+# cboxpreprocess(line)
+# --------------------
+#
+# PREPROCESS() implementation used by checkboxprompt().
+#
+# See read_filtered() / VARS / PREPROCESS for details.
+#
+# ARGS:  - line: Line to preprocess.
+#
+# STDIN:   Unused
+#
+# STDOUT:  checkboxprompt overrides.
+#
+# VARS:    None
+#
+# RETURN:  Unused
+#
+function cboxpreprocess {
+  echo "cboxprompt | cboxdisplay | $1 |"
+}
+
+# --------------------------------------------
+# cboxprompt(fieldname, prompt_message, label)
+# --------------------------------------------
+#
+# promptfn() implementation used by checkboxprompt().
+#
+# See multiprompt() / STDIN / [column 1] promptfn for details.
+#
+# ARGS:  - fieldname: Name of field.
+#
+#        - prompt_message: The prompt message.
+#
+#        - label: Label for use in list display function.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Unused
+#
+# VARS:    None
+#
+# RETURN:  Unused
+#
+function cboxprompt {
+  # Don't bother with input, just toggle the state.
+  [[ "${!1}" = "y" ]] && export $1=n || export $1=y
+}
+
+# ---------------------------------------------
+# cboxdisplay(fieldname, label, prompt_message)
+# ---------------------------------------------
+#
+# displayfn() implementation used by checkboxprompt().
+#
+# See multiprompt() / STDIN / [column 2] displayfn for details.
+#
+# ARGS:  - fieldname: Name of field.
+#
+#        - label: Label for use in list display function.
+#
+#        - prompt_message: The prompt message.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Display "LABEL=VALUE".
+#
+# VARS:    None
+#
+# RETURN:  Unused
+#
+function cboxdisplay {
+  [[ "${!1}" = "y" ]] && echo "[X] ${2}" || echo "[ ] ${2}"
+}
+
+# ----------------------------------
+# checkboxprompt(title, num_columns)
+# ----------------------------------
+#
+# Simplified multiprompt that works with a group of related checkboxes. Upon
+# completion, each supplied field will either have a value of 'y' or 'n'.
+#
+# ARGS:  - title: Text to show above the option listing.
+#
+#        - num_columns: Number of columns in the listing. Optional. Default=3.
+#
+# STDIN:   Rows of field records. Columns are separated with "|" by default
+#          and rows are separated with a newline character. Lines starting with
+#          a '#' character are ignored. Empty lines are ignored. Comments at
+#          the end of line starting with '#' and continuing to end of line are
+#          removed. Data table format:
+#
+#              [column 1] default
+#              ------------------
+#              Default value for the field. It will only be applied if the
+#              variable of the field doesn't already contain a value. Must
+#              contain value "y" or "n".
+#
+#              [column 2] fieldname
+#              --------------------
+#              Name of the field. Must be a single word name, it is used as
+#              bash variable name.
+#
+#              [column 3] label
+#              ----------------
+#              Short label for the field. Used in list mode.
+#
+# STDOUT:  Interactive.
+#
+# VARS:  - Each field is exported as a variable set to 'y' or 'n'.
+#
+#        - $checked: Output array of all fields that were checked "on".
+#
+#        - $unchecked: Output array of all fields that were not checked "on".
+#
+#        - $fields: Output array of field names that were processed.
+#
+#        - $labels: Output array of labels corresponding to the fields array.
+#
+#        - $PROMPT: Input - Message displayed during item selection. Default is
+#          "Toggle items by number or press [ENTER] to confirm"
+#
+#        - $SEPARATOR: Input - Column separator that delineates array items.
+#          Default if not specified is "|".
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLE:
+#
+#   prompt name "What's your first name"
+#   checkboxprompt "Choose Yoour Froots, $name" 3 <<EOF
+#     # default |  fieldname    |  label
+#     # -------------+----------+------------
+#       n       |  cherries     |  Cherries
+#       n       |  oranges      |  Oranges
+#       n       |  blueberries  |  Blueberries
+#       n       |  pears        |  Pears
+#       y       |  lemons       |  Lemons
+#       n       |  limes        |  Limes
+#       n       |  grapes       |  Grapes
+#       n       |  raspberries  |  Raspberries
+#       n       |  mango        |  Mango
+#       n       |  pomegranite  |  Pomegranite
+#   EOF
+#   [[ -z "$checked" ]] && checked="nothing!"
+#   [[ -z "$unchecked" ]] && unchecked="nothing!"
+#   echo "$name likes: $checked"
+#   echo "$name hates: $unchecked"
+#   echo "$name likes cherries? $cherries"
+#
+# See STDIN above for column definitions.
+#
+function checkboxprompt {
+  [[ -n "$PROMPT" ]] && promptmsg="$PROMPT" || \
+    promptmsg="Toggle items by number or press [ENTER] to confirm"
+  PREPROCESS="cboxpreprocess" PROMPT="$promptmsg" multiprompt "$1" "$2"
+  unset unchecked
+  unset checked
+  for f in ${fields[@]}; do [[ "${!f}" = "y" ]] && checked+="$f " || unchecked+="$f "; done
+  export checked
+  export unchecked
+}
+
+#------------------------------------------------------------------------------
+# UI: radio buttons
+#------------------------------------------------------------------------------
+
+# -------------------
+# radpreprocess(line)
+# -------------------
+#
+# PREPROCESS() implementation used by radioprompt().
+#
+# See read_filtered() / VARS / PREPROCESS for details.
+#
+# ARGS:  - line: Line to preprocess.
+#
+# STDIN:   Unused
+#
+# STDOUT:  radioprompt overrides.
+#
+# VARS:    None
+#
+# RETURN:  Unused
+function radpreprocess {
+  echo "radprompt | raddisplay | | $1 |"
+}
+
+# ---------
+# radinit()
+# ---------
+#
+# INIT() implementation used by radioprompt().
+#
+# See multiprompt() / VARS / INIT for details.
+#
+# ARGS:    None
+#
+# STDIN:   Unused
+#
+# STDOUT:  Unused
+#
+# VARS:  - $selected_value: Value selected by the user.
+#
+#        - $selected_label: Label for the value selected by the user.
+#
+#        - $selected_index: Item selected by the user.
+#
+# RETURN:  Unused
+#
+function radinit {
+  # Figure out the $selected_index using the $selected_value and fields array.
+  n=1
+  for field in ${fields[@]}; do
+    # If field value equals selected value, we found the $selected_index ($n).
+    [[ "$selected_value" = "${field}" ]] && break
+    n=$((n+1))
+  done
+  if [[ ${#fields[@]} = $(($n-1)) ]]; then
+    # There was no valid $selected_value so pick "1" and configure for it.
+    n=1
+    export selected_value="${fields[$n]}"
+  fi
+  export selected_index="$n"
+  export selected_label="${labels[$n]}"
+}
+
+# -------------------------------------------
+# radprompt(fieldname, prompt_message, label)
+# -------------------------------------------
+#
+# promptfn() implementation used by radioprompt().
+#
+# See multiprompt() / STDIN / [column 1] promptfn for details.
+#
+# ARGS:  - fieldname: Name of field.
+#
+#        - prompt_message: The prompt message.
+#
+#        - label: Label for use in list display function.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Display "LABEL=VALUE".
+#
+# VARS:  - $selected_value: Value selected by the user.
+#
+#        - $selected_label: Label for the value selected by the user.
+#
+#        - $selected_index: Item selected by the user.
+#
+# RETURN:  Unused
+#
+function radprompt {
+  # Don't bother with input, just toggle the state.
+  export selected_index="${i}" # $i = selected index
+  export selected_value="${1}" # $1 = field name
+  export selected_label="${labels[$selected_index]}"
+}
+
+# --------------------------------------------
+# raddisplay(fieldname, label, prompt_message)
+# --------------------------------------------
+#
+# displayfn() implementation used by radioprompt().
+#
+# See multiprompt() / STDIN / [column 2] displayfn for details.
+#
+# ARGS:  - fieldname: Name of field.
+#
+#        - label: Label for use in list display function.
+#
+#        - prompt_message: The prompt message.
+#
+# STDIN:   Unused
+#
+# STDOUT:  Display "LABEL=VALUE".
+#
+# VARS:    None
+#
+# RETURN:  Unused
+#
+function raddisplay {
+  [[ "${selected_index}" = "${n}" ]] && echo "(*) ${2}" || echo "( ) ${2}"
+}
+
+# ----------------------------------------
+# radioprompt(default, title, num_columns)
+# ----------------------------------------
+#
+# Simplified multiprompt that works with a group of related checkboxes. Upon
+# completion, each supplied field will either have a value of 'y' or 'n'.
+#
+# ARGS:  - default: Which option is selected by default. Must be a field in the
+#          STDIN data or item #1 will be selected by default.
+#
+#        - title: Text to show above the option listing.
+#
+#        - num_columns: Number of columns in the listing. Optional. Default=3.
+#
+# STDIN:   Rows of field records. Columns are separated with "|" by default
+#          and rows are separated with a newline character. Lines starting with
+#          a '#' character are ignored. Empty lines are ignored. Comments at
+#          the end of line starting with '#' and continuing to end of line are
+#          removed. Data table format:
+#
+#              [column 1] default
+#              ------------------
+#              Default value for the field. It will only be applied if the
+#              variable of the field doesn't already contain a value. Must
+#              contain value "y" or "n".
+#
+#              [column 2] fieldname
+#              --------------------
+#              Name of the field. Must be a single word name, it is used as
+#              bash variable name.
+#
+#              [column 3] label
+#              ----------------
+#              Short label for the field. Used in list mode.
+#
+# STDOUT:  Interactive.
+#
+# VARS:  - $selected_value: Value selected by the user.
+#
+#        - $selected_label: Label for the value selected by the user.
+#
+#        - $selected_index: Item selected by the user.
+#
+#        - $fields: Output array of field names that were processed.
+#
+#        - $labels: Output array of labels corresponding to the fields array.
+#
+#        - $PROMPT: Input - Message displayed during item selection. Default is
+#          "Toggle items by number or press [ENTER] to confirm"
+#
+#        - $SEPARATOR: Input - Column separator that delineates array items.
+#          Default if not specified is "|".
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLE:
+#
+#   radioprompt "raspberries" "Choose Yoour Froot" 3 <<EOF
+#     # -------------+----------------------
+#     # value        |   label
+#     # -------------+----------------------
+#       cherries     |   Cherries
+#       oranges      |   Oranges
+#       blueberries  |   Blueberries
+#       pears        |   Pears
+#       lemons       |   Lemons
+#       limes        |   Limes
+#   EOF
+#   echo "You picked: $selected_label ($selected_value)"
+#
+# See STDIN above for column definitions.
+#
+function radioprompt {
+  [[ -z "$3" ]] && ncolumns=3 || ncolumns="$3"
+  [[ -n "$PROMPT" ]] && msg="$PROMPT" || \
+    msg="Toggle items by number or press [ENTER] to confirm"
+  export selected_value="$1"
+  PREPROCESS="radpreprocess" INIT="radinit" PROMPT="$msg" \
+    multiprompt "$2" "$ncolumns"
+}
+
+
+# Utility: Common initilization for the init[7|8]? commands.
+function init_init {
+  mkdir -p "$SCRIPTHOME"
+  if [ ! -d "$SCRIPTHOME" ]; then
+    echo "Could not create $SCRIPTHOME program directory."
+    exit 1
+  fi
+  mkdir -p "$SCRIPTHOME/hooks"
+  mkdir -p "$SCRIPTHOME/servers"
+  mkdir -p "$SCRIPTHOME/settings"
+  mkdir -p "$SCRIPTHOME/settings/modules"
+  mkdir -p "$SCRIPTHOME/settings/themes"
+  mkdir -p "$SCRIPTHOME/cache"
+  [ -f "$SCRIPTHOME/cache/project.xml" ] || command_update
+  return 0
+}
+
+# Utility: Check `sudo` access. Sets PREFLGHT_ERROR and returns a nonzero value
+# if the access check failed.
+function preflight_sudo {
+  # TODO!
+  PREFLGHT_ERROR=""
+  return 1
+}
+
+#------------------------------------------------------------------------------
+# SERVER COMMAND: ping
+#------------------------------------------------------------------------------
+
+function preflight_ping {
+  return 0
+}
+
+function command_ping {
+  uname -a
+  return 0
+}
+
+#------------------------------------------------------------------------------
+# SERVER COMMAND: init_vhost
+#------------------------------------------------------------------------------
+
+function preflight_init_vhost {
+  preflight_sudo || return 1
+  return 0
+}
+
+function command_init_vhost {
+  echo
+}
+
+#------------------------------------------------------------------------------
+# USER COMMAND: init
+#------------------------------------------------------------------------------
+
+function shorthelp_init {
+  echo "Alias for init7 currently. Will change to init8."
+}
+
+function help_init {
+  help_init7
+}
+
+function command_init {
+  init7 $@
+}
+
+#------------------------------------------------------------------------------
+# USER COMMAND: init7
+#------------------------------------------------------------------------------
+
+function shorthelp_init7 {
+  echo "Create a Drupal 7 installation."
+}
+
+function help_init7 {
+  echo "TODO help_init7"
+}
+
+function command_init7 {
+  echo "init7 ARGS: $@"
+  ERROR=`init_init`
+  [ $? != 0 ] && fatal "Initialization error: $ERROR"
+  sshcmd monkeysatkeyboards.com fletch init_vhost
+}
+
+#------------------------------------------------------------------------------
+# USER COMMAND: init8
+#------------------------------------------------------------------------------
+
+function shorthelp_init8 {
+  echo "Create a Drupal 8 installation."
+}
+
+function help_init8 {
+  echo "TODO help_init8"
+}
+
+function command_init8 {
+  ERROR=`init_init`
+  [ $? != 0 ] && fatal "Initialization error: $ERROR"
+  echo "init8 ARGS: $@"
+}
+
+#------------------------------------------------------------------------------
+# USER COMMAND: servers
+#------------------------------------------------------------------------------
+
+function shorthelp_servers {
+  echo "List available servers."
+}
+
+function help_servers {
+  echo "TODO help_servers"
+}
+
+function command_servers {
+  ls "$SCRIPTHOME/servers" | sed 's/.server//g'
+}
+
+#------------------------------------------------------------------------------
+# USER COMMAND: addserver
+#------------------------------------------------------------------------------
+
+read -d "" addserver_CONFIG << EOF
+
+  addserver_alias | =PROMPT | \
+    Alias | Enter a short lowercase alias | \
+    --alias | -a | A short aliased name for the host.
+
+  addserver_host | =PROMPT | \
+    Host | Enter the server's host name | \
+    --host  | -h | Host name.
+
+  addserver_user | $(get user =PROMPT) | \
+    User | Enter the remote user name | \
+    --user | -u | User name.
+
+  addserver_identity | | \
+    SSH identity file | Path to SSH .pem identity file. | \
+    --identity-file | -i | SSH identity file path (optional).
+
+  addserver_sshopts | | \
+    SSH options | Additional SSH options. | \
+    --ssh-options | -o | Additional SSH options (optional).
+
+  addserver_database | =GROUP | \
+    Database settings | Database settings | | | | | \
+    addserver_group_prompt | addserver_database_display
+
+  addserver_dbtype | mysql | \
+    Database type | Database type | \
+    --db-type | -d | Database type (currently only mysql). | \
+    addserver_database | addserver_dbtype_prompt
+
+  addserver_dbuser | =PROMPT | \
+    Database user | Database user | \
+    --db-user | -U | Database user with permission to create databases. | \
+    addserver_database
+
+  addserver_dbpass | | \
+    Database password | Database password | \
+    --db-password | -p | Database password. | \
+    addserver_database | pwprompt
+
+  addserver_httpd | =GROUP | \
+    Web server settings | Web server settings | | | | | \
+    addserver_group_prompt | addserver_httpd_display
+
+  addserver_httpdtype | apache2 | \
+    Web server type | Web server type | \
+    --httpd-type | -H | Web server type (currently only apache2). | \
+    addserver_httpd | addserver_httpdtype_prompt
+
+EOF
+
+function addserver_group_prompt {
+  OLDPROMPT="${PROMPT}"
+  GROUP="$1" PROMPT="Choose item to edit or press [ENTER] to return" \
+    argsprompt "$2" 1 <<< "${addserver_CONFIG}"
+  export PROMPT="${OLDPROMPT}"
+}
+
+function addserver_database_display {
+  dbuser=$(get addserver_dbuser "[USER NOT SET]")
+  [ -n "${addserver_dbpass}" ] &&
+    dbpass="[PASSWORD SET]" ||
+    dbpass="[NO PASSWORD]"
+  echo "$2: ${addserver_dbtype} / ${dbuser} / ${dbpass}"
+}
+
+function addserver_httpd_display {
+  echo "$2: ${addserver_httpdtype}"
+}
+
+function shorthelp_addserver {
+  echo "Add a new server."
+}
+
+function help_addserver {
+  argshelp $1 "$PROGRAM $1 (ARGUMENTS)" <<EOL
+  TODO addserver help
+EOL
+}
+
+function preflight_addserver {
+
+  # Init ~/.ddo
+  if ! init_init; then
+    PREFLGHT_ERROR="Cannot initialize program directory $SCRIPTHOME."
+    return 1
+  fi
+
+  # Test access to $SCRIPTHOME/servers
+  f="$SCRIPTHOME/servers/TESTFILE"
+  touch "$f"
+  if [ -f "$f" ]; then
+    rm -f "$f"
+  else
+    PREFLGHT_ERROR="Cannot write to servers directory $SCRIPTHOME/servers."
+    return 1
+  fi
+
+  # Preflight passed.
+  return 0
+}
+
+function command_addserver {
+
+  # Process arguments.
+  PROMPT="Choose item to edit or press [ENTER] to test access and save" \
+    argsprompt "Add a new server" 1 "$@" <<< "${addserver_CONFIG}"
+
+  # Check output file.
+  file="$SCRIPTHOME/servers/${addserver_alias}.server"
+  [ -f "$file" ] && fatal "Server file \"${addserver_alias}.server\" already exists, cowardly refusing to overwrite existing server configuration."
+
+  # Write output file.
+  for f in ${fields[@]}; do
+    name=$(sed "s/addserver/${addserver_alias}/g" <<< ${f})
+    echo "${name}=${!f}" >> "$file"
+  done
+
+  # Read output file and test.
+  if ! loadserver "${addserver_alias}"; then
+    rm -f "$file"
+    fatal "Could not write server configuraion in $file."
+  fi
+  identity=$(get $(ns ${addserver_alias} _identity))
+  user=$(get $(ns ${addserver_alias} _user))
+  host=$(get $(ns ${addserver_alias} _host))
+  opts=$(get $(ns ${addserver_alias} _sshopts))
+
+  # Offer key exchange if the server is requiring a password.
+  unset exchange_args
+  if ssh_pw_required "${host}" "${user}" "${identity}" "${opts}"; then
+    echo
+    paragraph <<EOF
+      The SSH command requires a password for user "${user}" at \
+      host "${host}". It will ask for it quite often during normal \
+      operations. If you wish, we can attempt a key exchange with the remote \
+      server after which the password will not be required. Note that you can \
+      skip this now and run \`${PROGRAM} keyexchange\` later to exchange keys.
+EOF
+    if ynprompt v "Exchange public key with host ${host}?"; then
+      [ -f ~/.ssh/id_rsa.pub ] && exchange_args="-t rsa -s ${addserver_alias}"
+      # TODO handle other key types.
+    fi
+  fi
+
+  # Do key exchange if requested.
+  if [ -n "$exchange_args" ]; then
+    echo "Exchanging keys..."
+    if exchange_results=$(keyexchange ${exchange_args}); then
+      echo "${exchange_results}"
+    else
+      echo "Key exchange failed, sorry. Server said: ${exchange_results}."
+      exchange_results="Failed: ${exchange_results}"
+    fi
+  else
+    exchange_results="[NOT NEEDED]"
+  fi
+
+  # Test remote.
+  echo
+  printf "Testing remote access... "
+  if remoteuname="$(remote "$addserver_alias" ping)"; then
+    printf $'[OK]\n'
+  else
+    printf $'[ERROR]\n'
+    rm -f "$file"
+    fatal "Can't reach server, please check settings and try again."
+  fi
+
+  # Report success.
+  echo
+  FORMAT="rblx" MARGIN="3" HEADER_FORMAT="lb" ROWSPACING="1" tableformat <<EOF
+    Add new server
+    _
+    alias          | ${addserver_alias}
+    user           | ${user}
+    host           | ${host}
+    system         | ${remoteuname}
+    identity file  | $(get identity "[NOT SET]")
+    options        | $(get opts "[NOT SET]")
+    key exchange   | ${exchange_results}
+EOF
+  MARGIN="3" paragraph <<EOF
+    _
+    Connection to host ${host} with user ${user} is confirmed. Server with \
+    alias "${addserver_alias}" was successfully configured.
+    Note that user ${user}@${host} must have administrative privileges or \
+    must be configured to use sudo.
+EOF
+# TODO note about what exact admin privs user needs above.
+# TODO test apachectl access
+}
+
+#------------------------------------------------------------------------------
+# SERVER COMMAND: keyexchange_rsa
+#------------------------------------------------------------------------------
+
+function command_keyexchange_rsa {
+
+  # Parse the key.
+  key="$1"
+  [ -z "$key" ] && fatal "No key given."
+  IFS=" " read type rsa id <<< "${key}"
+  [ -z "$type" ] || [ -z "$rsa" ] || [ -z "$id" ] && fatal "Bad key format."
+
+  # Append or write new key file.
+  file="$(echo ~/.ssh/authorized_keys)"
+  if [ -f "$file" ]; then
+    if grep "$rsa" "$file" >> /dev/null; then
+      # Key already in authorized_keys.
+      echo "Key is already in file ${file}, skipping."
+    else
+      # Append the file.
+      echo "${key}" >> "$file"
+      [ grep "$rsa" "$file" >> /dev/null ] ||
+        fatal "Could not append key to file ${file}."
+    fi
+  else
+    # No existing file just write a new one.
+    echo "${key}" > "$file"
+    [ -f "$file" ] || fatal "Could not create file ${file}."
+    echo "Created $file."
+  fi
+}
+
+#------------------------------------------------------------------------------
+# USER COMMAND: keyexchange
+#------------------------------------------------------------------------------
+
+read -d "" keyexchange_CONFIG << EOF
+
+  keyexchange_type | =REQUIRED | \
+    Type of key | Type of key | \
+    --type | -t | Key type. Currently only 'rsa' is supported.
+
+  keyexchange_server | =REQUIRED | \
+    Server alias | Server alias | \
+    --server | -s | Server alias.
+
+  keyexchange_keyfile | $(echo ~/.ssh/id_rsa.pub) | \
+    Key file | Key file | \
+    --file | -f | Key file.
+
+EOF
+
+function shorthelp_keyexchange {
+  echo "Exchange SSH keys with a server."
+}
+
+function help_keyexchange {
+  argshelp $1 "$PROGRAM $1 (ARGUMENTS)" <<EOL
+  TODO keyexchange help
+EOL
+}
+
+# Workhorse function for keyexchange command, also utility used by addserver.
+function keyexchange {
+
+  # Process arguments.
+  PROMPT="Choose item to edit or press [ENTER] to exchange keys" \
+    argsprompt "Key exchange" 1 "$@" <<< "${keyexchange_CONFIG}"
+
+  # Read key file.
+  if [ ! -f "$keyexchange_keyfile" ]; then
+    echo "Could not open key file ${keyexchange_keyfile}."
+    return 1
+  fi
+  read key < "$keyexchange_keyfile"
+  if [ -z "$key" ]; then
+    echo "Could not read key from file ${keyexchange_keyfile}."
+    return 2
+  fi
+
+  # Figure out which remote key exchange command to use.
+  remotecmd="keyexchange_${keyexchange_type}"
+  if ! func $(ns command_ ${remotecmd}); then
+    echo "Sorry I don't understand key type '${keyexchange_type}'."
+    return 3
+  fi
+
+  # Load server data.
+  if ! loadserver "${keyexchange_server}"; then
+    echo "Cannot load server \"${keyexchange_server}\"."
+    return 4
+  fi
+  user=$(get $(ns ${keyexchange_server} _user))
+  host=$(get $(ns ${keyexchange_server} _host))
+  identity=$(get $(ns ${keyexchange_server} _identity))
+  opts=$(get $(ns ${keyexchange_server} _sshopts))
+
+  # Execute remote key exchange command.
+  result=$(remote "${keyexchange_server}" "${remotecmd}" "\"${key}\"")
+  if [ $? = 0 ]; then
+    if ssh_pw_required "${host}" "${user}" "${identity}" "${opts}"; then
+      [ -n "$result" ] &&
+        echo "Reason unknown. Remote host said: \"$result\"." ||
+        echo "Reason unknown."
+      return 5
+    else
+      echo "$result"
+      return 0
+    fi
+  else
+    echo "$result"
+    return 6
+  fi
+}
+
+function command_keyexchange {
+  result=$(keyexchange $@) &&
+    echo "Key exchange success: $result" ||
+    fatal "Key exchange failed: $result"
+}
+
+#------------------------------------------------------------------------------
+# USER COMMAND: modserver
+#------------------------------------------------------------------------------
+
+function shorthelp_modserver {
+  echo "Modify an existing server."
+}
+
+function help_modserver {
+  echo "TODO help_modserver"
+}
+
+function command_modserver {
+  echo "modserver ARGS: $@"
+}
+
+#------------------------------------------------------------------------------
+# USER COMMAND: delserver
+#------------------------------------------------------------------------------
+
+function shorthelp_delserver {
+  echo "Remove a server."
+}
+
+function help_delserver {
+  longhelp $1 "$PROGRAM $1 [SERVERNAME]" <<EOL
+  Delete a server by alias. TODO WILL THIS AFFECT EXISTING PROJECTS?
+EOL
+}
+
+function command_delserver {
+  echo "delserver ARGS: $@"
+}
+
+#------------------------------------------------------------------------------
+# USER COMMAND: update
+#------------------------------------------------------------------------------
+
+function shorthelp_update {
+  echo "Update Drupal project information from updates.drupal.org."
+}
+
+function help_update {
+  echo "TODO help_update"
+}
+
+function __update_modules {
+  type=$1
+  vers=$2
+  output=$3
+  echo -n "Updating $vers ${type}s... "
+  xmllint --shell "${SCRIPTHOME}/cache/project.xml" <<< "cat /projects/project/project_status[text()=\"published\"]/../type[text()=\"project_${type}\"]/../api_versions/api_version[text()=\"${vers}\"]/../../short_name/text()" | grep -v " -------" | grep -v "/ >" > "$output"
+  echo `wc -l "$output" | sed "s/[^0-9]//g"` "found."
+}
+
+function _update_modules {
+  __update_modules module 7.x "$SCRIPTHOME/cache/module-7.x"
+  __update_modules theme 7.x "$SCRIPTHOME/cache/theme-7.x"
+  __update_modules module 8.x "$SCRIPTHOME/cache/module-8.x"
+  __update_modules theme 8.x "$SCRIPTHOME/cache/theme-8.x"
+}
+#_update_modules
+
+function command_update {
+  rm -f $SCRIPTHOME/cache/project.xml
+  wget http://updates.drupal.org/release-history/project-list/all -O $SCRIPTHOME/cache/project.xml
+  _update_modules
+  echo "TODO update"
+}
+
+#------------------------------------------------------------------------------
+# USER COMMAND: help
+#------------------------------------------------------------------------------
+
+help_DEPS="tr fmt"
+package_Cygwin_tr="coreutils"
+package_Cygwin_fmt="coreutils"
+
+function shorthelp_help {
+  echo "Display a help message."
+}
+
+function help_help {
+  longhelp $1 "$PROGRAM $1" "$PROGRAM $1 [COMMAND]" <<EOL
+  Yo dawg I heard you like help with your help. So I'm here to help.
+
+  The 'drupal help' form of the command shows a list of commands and main
+  program usage.
+
+  The 'drupal help [COMMAND]' form displays help for a specified command.
+EOL
+}
+
+function command_help {
+  if test -z "$1"; then
+    usage
+    exit 0
+  else
+    echo
+    if ! valid_command "$1"; then
+      usage "No help for unknown command \"$1\""; exit -3;
+    fi
+    $(ns help_ $1) $1
+  fi
+}
+
+#------------------------------------------------------------------------------
+# Initialization.
+#------------------------------------------------------------------------------
+
+# This and the -i switch in the hashbang at the top of the file are necessary
+# to read COLUMNS shell var.
+kill -s WINCH $$
+
+# Commands.
+USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
+SERVER_COMMANDS="ping init_vhost keyexchange_rsa apache2_scan mysql_scan"
+if [ $1 == "--remote" ]; then
+  REMOTE=1
+  shift
+fi
+[ $REMOTE == 1 ] && COMMANDS="${SERVER_COMMANDS}" || COMMANDS="${USER_COMMANDS}"
+
+# Common deps.
+DEPS="ssh awk grep sed wget git tbl groff tr"
+
+# Parse arguments.
+unset command
+declare -a commands
+i=0
+while : ; do
+  [[ -z "$1" ]] && break
+  if [[ "$1" = "--" ]]; then
+    [[ -n "$command" ]] && commands[$i]="$command"
+    i=$((i+1))
+    unset command
+    shift
+    continue
+  fi
+  [[ -z "$command" ]] && command="$1" || command+=" \"$1\""
+  shift
+done
+[[ -n "$command" ]] && commands[$i]="$command"
+[[ -z "$commands[*]" ]] && fatal "No command given"
+
+# Check the commands.
+unset invalid_commands
+for command_and_args in "${commands[@]}"; do
+  acommand=($command_and_args)
+  command=${acommand[0]}
+  if ! valid_command $command; then
+    [[ -n "${invalid_commands[*]}" ]] && invalid_commands+=" "
+    invalid_commands+=$command
+  fi
+done
+
+# Did we understand all the commands?
+[[ -n "${invalid_commands[*]}" ]] && \
+  fatal "Unknown command(s) \"$invalid_commands\". Try \`$PROGRAM help\`."
+
+# Package manager function for Cygwin.
+function package_Cygwin {
+  echo " - Please use Cygwin setup.exe to install package \"$*\"."
+}
+
+# Collect deps.
+SED="sed" # needed because ns uses it, will be replaced in deps processing.
+OS="$(uname -o)"
+PM_INSTALL=$(ns package_ $OS)
+for command_and_args in "${commands[@]}"; do
+  acommand=($command_and_args)
+  command=${acommand[0]}
+  command_DEPS=$(ns $command _DEPS)
+  if [[ -n "${!command_DEPS}" ]]; then
+    [[ -n "${DEPS}" ]] && DEPS+=" "
+    DEPS+="${!command_DEPS}"
+  fi
+done
+
+# Find missing deps.
+unset missing
+for dep in $DEPS; do
+  prog DEP $dep || missing+="$dep "
+done
+
+# Process missing deps.
+if [ -n "$missing" ]; then
+
+  echo -e "\nMissing tools..."
+
+  # Gather info about the tool packages.
+  unset packages
+  for item in $missing; do
+    package=$(ns package_ $OS _ $item)
+    if [[ -z "${!package}" ]] || ! func ${PM_INSTALL}; then
+      echo " - $item: no suggestion on how to install, sorry"
+      continue
+    fi
+    packages+="${!package}"
+  done
+
+  # Run package manager.
+  packages=`echo "$packages" | xargs -n1 | sort -u | xargs` # unique, sorted
+  for package in $packages; do
+    ${PM_INSTALL} ${package}
+  done
+
+  # Did that solve it?
+  unset still_missing
+  for item in $missing; do
+    prog DEP $item || still_missing+="$item "
+  done
+
+  # Report.
+  echo
+  [[ -n "$still_missing" ]] && \
+    fatal "Could not automatically resolve the following missing tools: $still_missing" ||
+    echo "Automatically resolved missing deps \"$missing\"."
+
+fi
+
+# Process deps.
+prog _AWK awk # temp need for loop below.
+for dep in $DEPS; do
+  depname=`echo $dep | $_AWK '{print toupper($0)}'`
+  prog $depname $dep
+done
+unset _AWK
+unset missing
+
+function preflight_help {
+  PREFLGHT_ERROR="This is an fatal."
+  return 0
+}
+
+# UTF-8 autodetect
+if [ $REMOTE != 1 ]; then
+  CHARMAP=$(locale charmap)
+  if [ "${CHARMAP}" != "UTF-8" ]; then
+    echo
+    paragraph <<< "It looks like your terminal might not be configured to support UTF-8 characters. Would you like to use plain ASCII mode instead?"
+    ynprompt v "Press 'y' to continue in UTF-8 mode or 'n' to change to ASCII." y || OUTPUT_MODE="ascii"
+  fi
+fi
+
+# Preflght checks.
+declare -a PREFLIGHT_ERRORS
+declare -a PREFLIGHT_WARNINGS
+flightcheck=0
+for command_and_args in "${commands[@]}"; do
+  acommand=($command_and_args)
+  command=${acommand[0]}
+  if func $(ns preflight_ $command); then
+    unset PREFLGHT_ERROR
+    preflight="`sed s/^${command}/preflight_${command}/g <<< \"$command_and_args\"`"
+    eval $preflight
+    result=$?
+    flightcheck=$(( $flightcheck | $result ))
+    [[ $result ]] && [[ -n "$PREFLGHT_ERROR" ]] && PREFLIGHT_ERRORS[${#PREFLIGHT_ERRORS[@]}]="$PREFLGHT_ERROR"
+    [[ $result ]] && [[ -n "$PREFLIGHT_WARNING" ]] && PREFLIGHT_WARNINGS[${#PREFLIGHT_WARNINGS[@]}]="$PREFLIGHT_WARNING"
+  fi
+done
+if [[ $flightcheck != 0 ]]; then
+  echo "${PREFLIGHT_ERRORS[*]}"
+  fatal "Did not pass preflight checks: ${PREFLIGHT_ERRORS[*]}" # TODO list ERRORs
+fi
+
+# Main.
+for command_and_args in "${commands[@]}"; do
+  eval command_${command_and_args}
+done
