@@ -1124,13 +1124,6 @@ function display {
 #
 # See STDIN above for column definitions.
 #
-function multiprompt_Xxx {
-  # Note: _multiprompt is run in a subshell because it recurses and bash has
-  # an odd behavior where locals are overwritten during the recursion. We
-  # capture output of _multiprompt which is a list of vars, and evaluate it.
-  eval "$(_multiprompt "$1" "$2")"
-}
-
 function multiprompt {
   local -a multiprompt_fields
   local -a multiprompt_labels
@@ -1279,96 +1272,114 @@ declare -a labels
 function argsprompt {
 
   # Variables init.
-  title="$1"; shift
-  num_columns="$1"; shift
-  promptfn=$(get PROMPTFN textprompt)
-  displayfn=$(get DISPLAYFN display)
+  local exitearly=$(get EARLYEXIT $(get FORCE_YES, 0))
+  local title="$1"; shift
+  local num_columns="$1"; shift
+  local promptfn=$(get PROMPTFN textprompt)
+  local displayfn=$(get DISPLAYFN display)
+  local pfn
+  local dfn
 
-  unset config
-  unset __fields
-  unset __labels
-  unset required
-  unset prompts
-  unset longopts
-  unset shortopts
-  unset inputdata
-  local -a __fields
-  local -a __labels
-  local -a required
-  local -a prompts
-  local -a longopts
-  local -a shortopts
+  if [ -z "$GROUP" ]; then
+    # Only declare these at the top group. When recursing, keep the values.
+    local -a argsprompt_fields
+    local -a argsprompt_defaults
+    local -a argsprompt_required
+    local -a argsprompt_immediate
+    local -a argsprompt_labels
+    local -a argsprompt_prompts
+    local -a argsprompt_longopts
+    local -a argsprompt_shortopts
+    local -a argsprompt_groups
+    local -a argsprompt_promptfns
+    local -a argsprompt_displayfns
+  fi
 
-  # Parse the config and build approriate string for multiprompt.
+  # Parse the config.
+  local i=0
   while read_array a; do
-    unset dflt
-    __fields[${#__fields[@]}]="${a[0]}"
-    __labels[${#__labels[@]}]="${a[2]}"
+    local field="${a[0]}"
+    [ -n "${a[8]}" ] && pfn="${a[8]}" || pfn="${promptfn}"
+    [ -n "${a[9]}" ] && dfn="${a[9]}" || dfn="${displayfn}"
+    argsprompt_fields["${i}"]="${field}"
+    argsprompt_defaults["${i}"]="${a[1]}"
+    local immediate=0
     case "${a[1]}" in
+      "=GROUP")
+        [ -z "${a[8]}" ] && pfn="argsprompt_group_prompt"
+      ;;
       "=PROMPT")
-        if [ "${GROUP}" = "${a[7]}" ]; then
-          required[${#required[@]}]="${a[0]}"
-          prompts[${#prompts[@]}]="${a[0]}"
-        fi
-        dflt="=PROMPT"
+        immediate=1
+        argsprompt_required["${#argsprompt_required[@]}"]="${field}"
       ;;
       "=REQUIRED")
-        [ "${GROUP}" = "${a[7]}" ] && required[${#required[@]}]="${a[0]}"
+        argsprompt_required["${#argsprompt_required[@]}"]="${field}"
       ;;
       *)
         [ -z "${!a[0]}" ] && export ${a[0]}="${a[1]}"
-        dflt="${a[1]}"
       ;;
     esac
-    if [ "${GROUP}" = "${a[7]}" ]; then
-      longopts[${#longopts[@]}]="${a[4]}"
-      shortopts[${#shortopts[@]}]="${a[5]}"
-      [ -n "${a[8]}" ] && pfn="${a[8]}" || pfn="${promptfn}"
-      [ -n "${a[9]}" ] && dfn="${a[9]}" || dfn="${displayfn}"
-      config+="${pfn}|${dfn}|${dflt}|${a[0]}|${a[2]}|${a[3]}"$'\n'
-    fi
+    argsprompt_immediate["${i}"]="${immediate}"
+    argsprompt_labels["${i}"]="${a[2]}"
+    argsprompt_prompts["${i}"]="${a[3]}"
+    argsprompt_longopts["${i}"]="${a[4]}"
+    argsprompt_shortopts["${i}"]="${a[5]}"
+    argsprompt_groups["${i}"]="${a[7]}"
+    argsprompt_promptfns["${i}"]="$pfn"
+    argsprompt_displayfns["${i}"]="$dfn"
+    i=$((i+1))
   done
 
   # Parse arguments.
   while : ; do
     [[ -z "$1" ]] && break
-    i=0
-    handled=0
+    local i=0
+    local handled=0
     while : ; do
       case "$1" in
-        "${longopts[$i]}")
-          export ${__fields[$i]}=$2
+        "${argsprompt_longopts[$i]}")
+          export ${argsprompt_fields[$i]}=$2
           shift; shift
           handled=1
         ;;
-        "${shortopts[$i]}")
-          export ${__fields[$i]}=$2
+        "${argsprompt_shortopts[$i]}")
+          export ${argsprompt_fields[$i]}=$2
           shift; shift
           handled=2
         ;;
-        ${longopts[$i]}=*)
-          export ${__fields[$i]}="`sed \"s/${longopts[$i]}=//g\" <<< \"$1\"`"
+        ${argsprompt_longopts[$i]}=*)
+          export ${argsprompt_fields[$i]}="`sed \"s/${argsprompt_longopts[$i]}=//g\" <<< \"$1\"`"
           shift
           handled=3
         ;;
-        ${shortopts[$i]}=*)
-          export ${__fields[$i]}="`sed \"s/${shortopts[$i]}=//g\" <<< \"$1\"`"
+        ${argsprompt_shortopts[$i]}=*)
+          export ${argsprompt_fields[$i]}="`sed \"s/${argsprompt_shortopts[$i]}=//g\" <<< \"$1\"`"
           shift
           handled=4
         ;;
       esac
       i=$((i+1))
       [ $handled != 0 ] && break
-      [ "$i" -ge "${#__fields[@]}" ] && break
+      [ "$i" -ge "${#argsprompt_fields[@]}" ] && break
     done
     [ $handled = 0 ] && fatal "bad arg: '$1'" # TODO better error handling
   done
 
-  # Check if we have all required fields and no fields requiring prompt.
-  if test ${#prompts[@]} = 0 -a ${#required[@]} -gt 0 -a -z "${GROUP}"; then
-    # Prompts array is empty.
-    hasrequired=1
-    for field in ${required[@]}; do
+  # Do immediate prompting.
+  for i in "${!argsprompt_fields[@]}"; do
+    [ "${argsprompt_immediate[$i]}" = 0 ] && continue
+    local field="${argsprompt_fields[$i]}"
+    local prompt="${argsprompt_prompts[$i]}"
+    local label="${argsprompt_labels[$i]}"
+    while [ -z "${!field}" ]; do
+      "${argsprompt_promptfns[${i}]}" "${field}" "${prompt}" "${label}" </dev/tty
+    done
+  done
+
+  # Check if we have all argsprompt_required fields.
+  if [ $exitearly != 0 ]; then
+    local hasrequired=1
+    for field in "${argsprompt_required[@]}"; do
       if [ -n "${!field}" ]; then
         # Required field has a value, keep checking.
         continue
@@ -1378,20 +1389,40 @@ function argsprompt {
         break
       fi
     done
-    [ $hasrequired = 1 ] && return 0 # Early exit all required fields supplied.
+    # Early exit if all argsprompt_required fields supplied and requested.
+    [ $hasrequired = 1 ] && return 0
   fi
 
-  # Prompt.
+  # Build a multiprompt config for the current group.
+  local argsprompt_mpconfig=""
+  for i in "${!argsprompt_fields[@]}"; do
+    if [ "${GROUP}" = "${argsprompt_groups[$i]}" ]; then
+      argsprompt_mpconfig+="${argsprompt_promptfns[${i}]}|"
+      argsprompt_mpconfig+="${argsprompt_displayfns[${i}]}|"
+      argsprompt_mpconfig+="${argsprompt_defaults[${i}]}|"
+      argsprompt_mpconfig+="${argsprompt_fields[${i}]}|"
+      argsprompt_mpconfig+="${argsprompt_labels[${i}]}|"
+      argsprompt_mpconfig+="${argsprompt_prompts[${i}]}|"
+      argsprompt_mpconfig+=$'\n'
+    fi
+  done
+
+  # Do multiprompt until all required values are supplied.
   while : ; do
-    PREFIX="" PREPROCESS="" multiprompt "${title}" "${num_columns}" <<< "$config"
-    for field in ${required[@]}; do
+    PREFIX="" PREPROCESS="" \
+      multiprompt "${title}" "${num_columns}" <<< "$argsprompt_mpconfig"
+    for field in "${argsprompt_required[@]}"; do
       [ -z "${!field}" ] && continue 2
     done
     break
   done
 
-  fields=${__fields[@]}
-  labels=${__labels[@]}
+  fields=${argsprompt_fields[@]}
+  labels=${argsprompt_labels[@]}
+}
+
+function argsprompt_group_prompt {
+  GROUP="$1" PROMPT="$2" argsprompt "$3" 1 <<< ""
 }
 
 #------------------------------------------------------------------------------
@@ -1913,8 +1944,8 @@ read -d "" addserver_CONFIG << EOF
     --ssh-options | -o | Additional SSH options (optional).
 
   addserver_database | =GROUP | \
-    Database settings | Database settings | | | | | \
-    addserver_group_prompt | addserver_database_display
+    Database settings | Choose item to edit or press [ENTER] to return | | | | | \
+    | addserver_database_display
 
   addserver_dbtype | mysql | \
     Database type | Database type | \
@@ -1932,8 +1963,8 @@ read -d "" addserver_CONFIG << EOF
     addserver_database | pwprompt
 
   addserver_httpd | =GROUP | \
-    Web server settings | Web server settings | | | | | \
-    addserver_group_prompt | addserver_httpd_display
+    Web server settings | Choose item to edit or press [ENTER] to return | | | | | \
+    | addserver_httpd_display
 
   addserver_httpdtype | apache2 | \
     Web server type | Web server type | \
@@ -1943,10 +1974,17 @@ read -d "" addserver_CONFIG << EOF
 EOF
 
 function addserver_group_prompt {
-  OLDPROMPT="${PROMPT}"
   GROUP="$1" PROMPT="Choose item to edit or press [ENTER] to return" \
-    argsprompt "$2" 1 <<< "${addserver_CONFIG}"
-  export PROMPT="${OLDPROMPT}"
+    argsprompt "$2" 1 <<< ""
+}
+
+function addserver_httpdtype_prompt {
+  local -r addserver_httpdtype_prompt_field="${1}"
+  PROMPT="" radioprompt "${!addserver_httpdtype_prompt_field}" "$2" 3 <<EOF
+    apache2 |   Apache 2
+    nginx   |   Nginx
+EOF
+  export ${addserver_httpdtype_prompt_field}="${selected_value}"
 }
 
 function addserver_database_display {
