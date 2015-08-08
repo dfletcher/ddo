@@ -1973,11 +1973,6 @@ read -d "" addserver_CONFIG << EOF
 
 EOF
 
-function addserver_group_prompt {
-  GROUP="$1" PROMPT="Choose item to edit or press [ENTER] to return" \
-    argsprompt "$2" 1 <<< ""
-}
-
 function addserver_httpdtype_prompt {
   local -r addserver_httpdtype_prompt_field="${1}"
   PROMPT="" radioprompt "${!addserver_httpdtype_prompt_field}" "$2" 3 <<EOF
