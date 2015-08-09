@@ -203,21 +203,16 @@ function ssh_pw_required {
 #   sshcmd mysite.com fletch ping # Prints `uname -a` from the server.
 #
 function sshcmd {
-  host=$1; shift
-  user=$1; shift
-  identity=$(get IDENTITY_FILE)
-  options=$(get SSH_OPTIONS)
-  unset args
-  [ -f "$identity" ] && args+=" -i ${identity}"
-  [ -n "${options}" ] && args+=" ${options}"
-  args+=" -l ${user} ${host}"
-  args+=" S=\$(mktemp) &&"
-  args+=" cat - > \"\$S\" &&"
-  args+=" bash \$S --remote $@;"
-  args+=" E=\$?;"
-  args+=" rm \"\$S\";"
-  args+=" exit $E;"
-  ${SSH} $args < $SCRIPTPATH
+  local host=$1; shift
+  local user=$1; shift
+  local options=$(get SSH_OPTIONS)
+  local identity=$(get IDENTITY_FILE)
+  [ -f "$identity" ] && options+=" -i ${identity}"
+  [ -n "$user" ] && options+=" -l ${user}"
+  options+=" ${host}"
+  args="$(printf " \"%s\"" "$@")"
+  ${CAT} $SCRIPTPATH | ${SED} "s@#!/bin/bash -i@#!/bin/bash@g" | \
+    ${SSH} ${options} "bash /dev/stdin --remote $args"
 }
 
 # -------------------
@@ -498,8 +493,7 @@ function tableformat {
     for field in "${a[@]}"; do
       # TODO figure out how to get rid of `echo -e` here.
       i=$((i+1))
-      v="$(echo -e "${field}" | ${SED} -e 's/^[[:space:]]*//' \
-         -e 's/[[:space:]]*$//' | ${TR} -s ' ')"
+      v="$(echo -e "${field}" | ${SED} -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | ${TR} -s ' ')"
       [ -z "${v}" ] && continue
       [ $i -gt 1 ] && body+="${tab}"
       [ ${#v} = 1 ] &&
@@ -1156,7 +1150,7 @@ function multiprompt {
     for field in ${multiprompt_fields[@]}; do
       display="`${multiprompt_displayfns[$n]} ${field} \"${multiprompt_labels[$n]}\" \"${multiprompt_promptmsgs[$n]}\"`"
       table+="|`printf \"%3s %s\" \"${n}.\" \"${display}\"`"
-      ((n % ${ncolumns} == 0)) && table+=$'\n'
+      [ $(($n % ${ncolumns})) = 0 ] && table+=$'\n'
       n=$((n+1))
     done
     printf $'\n%s:\n\n' "${1}" >> /dev/tty
@@ -2215,7 +2209,7 @@ function keyexchange {
   opts=$(get $(ns ${keyexchange_server} _sshopts))
 
   # Execute remote key exchange command.
-  result=$(remote "${keyexchange_server}" "${remotecmd}" "\"${key}\"")
+  result=$(remote "${keyexchange_server}" "${remotecmd}" "${key}")
   if [ $? = 0 ]; then
     if ssh_pw_required "${host}" "${user}" "${identity}" "${opts}"; then
       [ -n "$result" ] &&
@@ -2355,14 +2349,14 @@ kill -s WINCH $$
 # Commands.
 USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
 SERVER_COMMANDS="ping init_vhost keyexchange_rsa apache2_scan mysql_scan"
-if [ $1 == "--remote" ]; then
+if [ "$1" = "--remote" ]; then
   REMOTE=1
   shift
 fi
-[ $REMOTE == 1 ] && COMMANDS="${SERVER_COMMANDS}" || COMMANDS="${USER_COMMANDS}"
+[ $REMOTE = 1 ] && COMMANDS="${SERVER_COMMANDS}" || COMMANDS="${USER_COMMANDS}"
 
 # Common deps.
-DEPS="ssh awk grep sed wget git tbl groff tr"
+DEPS="cat ssh awk grep sed wget git tbl groff tr"
 
 # Parse arguments.
 unset command
@@ -2381,7 +2375,6 @@ while : ; do
   shift
 done
 [[ -n "$command" ]] && commands[$i]="$command"
-[[ -z "$commands[*]" ]] && fatal "No command given"
 
 # Check the commands.
 unset invalid_commands
@@ -2393,10 +2386,6 @@ for command_and_args in "${commands[@]}"; do
     invalid_commands+=$command
   fi
 done
-
-# Did we understand all the commands?
-[[ -n "${invalid_commands[*]}" ]] && \
-  fatal "Unknown command(s) \"$invalid_commands\". Try \`$PROGRAM help\`."
 
 # Package manager function for Cygwin.
 function package_Cygwin {
@@ -2453,10 +2442,12 @@ if [ -n "$missing" ]; then
 
   # Report.
   echo
-  [[ -n "$still_missing" ]] && \
-    fatal "Could not automatically resolve the following missing tools: $still_missing" ||
+  if [ -n "$still_missing" ]; then
+    echo "Could not automatically resolve the following missing tools: $still_missing" ||
+    exit 1
+  else
     echo "Automatically resolved missing deps \"$missing\"."
-
+  fi
 fi
 
 # Process deps.
@@ -2473,15 +2464,21 @@ function preflight_help {
   return 0
 }
 
+# Did we understand all the commands?
+[[ -z "$commands[*]" ]] && fatal "No command given"
+[[ -n "${invalid_commands[*]}" ]] && \
+  fatal "Unknown command(s) \"$invalid_commands\". Try \`$PROGRAM help\`."
+
+
 # UTF-8 autodetect
-if [ $REMOTE != 1 ]; then
-  CHARMAP=$(locale charmap)
-  if [ "${CHARMAP}" != "UTF-8" ]; then
-    echo
-    paragraph <<< "It looks like your terminal might not be configured to support UTF-8 characters. Would you like to use plain ASCII mode instead?"
-    ynprompt v "Press 'y' to continue in UTF-8 mode or 'n' to change to ASCII." y || OUTPUT_MODE="ascii"
-  fi
-fi
+#if [ $REMOTE != 1 ]; then
+#  CHARMAP=$(locale charmap)
+#  if [ "${CHARMAP}" != "UTF-8" ]; then
+#    echo
+#    paragraph <<< "It looks like your terminal might not be configured to support UTF-8 characters. Would you like to use plain ASCII mode instead?"
+#    ynprompt v "Press 'y' to continue in UTF-8 mode or 'n' to change to ASCII." y || OUTPUT_MODE="ascii"
+#  fi
+#fi
 
 # Preflght checks.
 declare -a PREFLIGHT_ERRORS
