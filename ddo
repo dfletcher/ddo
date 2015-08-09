@@ -620,7 +620,7 @@ EOF
 #
 function fatal {
   exitcode=$(get EXITCODE 1)
-  echo -e "$*" | paragraph > /dev/stderr
+  echo -e "$*" | MARGIN="0" paragraph > /dev/stderr
   exit $exitcode
 }
 
