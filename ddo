@@ -1915,7 +1915,7 @@ function command_servers {
 # USER COMMAND: addserver
 #------------------------------------------------------------------------------
 
-read -d "" addserver_CONFIG << EOF
+read -d "" addserver_CONFIG <<EOF
 
   addserver_alias | =PROMPT | \
     Alias | Enter a short lowercase alias | \
