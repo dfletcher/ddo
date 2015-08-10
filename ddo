@@ -1124,6 +1124,8 @@ function multiprompt {
   local -a multiprompt_promptfns
   local -a multiprompt_displayfns
   local -a multiprompt_promptmsgs
+  local -a multiprompt_predicates
+  local pmsg="$(get PROMPT 'Choose item or [ENTER] to confirm')"
   n=1
   while read_array a; do
     multiprompt_promptfns[$n]="${a[0]}"
@@ -1131,6 +1133,8 @@ function multiprompt {
     multiprompt_fields[$n]="${a[3]}"
     multiprompt_labels[$n]="${a[4]}"
     multiprompt_promptmsgs[$n]="${a[5]}"
+    # Prepare for awk by replacing "]\s*[" with "|" and removing "\s*" before the first "[".
+    multiprompt_predicates[$n]="$(sed 's/\][[:space:]]*\[/|/g' <<< "${a[6]}" | sed 's/[[:space:]]*\[/\[/g')"
     if [[ -z "${!a[3]}" ]]; then # Value not already set.
       if [[ "${a[2]}" = "=PROMPT" ]]; then
         # Magic value "=PROMPT" so promp user now.
@@ -1144,10 +1148,23 @@ function multiprompt {
   done
   [[ -n "${INIT}" ]] && ${INIT}
   while : ; do
-    n=1
+    local n=1
     valid_number 1 64 ${2} && ncolumns=${2} || ncolumns=3
-    table=""
-    for field in ${multiprompt_fields[@]}; do
+    local table=""
+    local -a selectmap
+    for i in "${!multiprompt_fields[@]}"; do
+      local field="${multiprompt_fields[$i]}"
+      local j=2
+      while : ; do
+        local predicate="$(awk -F"[\\\\]|\\\\[|\\\\|]+" "{print \$${j}}" <<< "${multiprompt_predicates[$i]}")"
+        [ -z "${predicate}" ] && break
+        local testfield="$(sed 's/[[:space:]]*\([^\=[:space:]]*\)\=[^$]*/\1/g' <<< ${predicate})"
+        local testvalue="$(sed 's/[^\=]*\=\([^$]*\)/\1/g' <<< ${predicate})"
+        echo "predicate check: '${!testfield}' != '${testvalue}' (in field ${testfield})"
+        [ "${!testfield}" != "${testvalue}" ] && continue 2
+        j=$((j+1))
+      done
+      selectmap[$n]="$i"
       display="`${multiprompt_displayfns[$n]} ${field} \"${multiprompt_labels[$n]}\" \"${multiprompt_promptmsgs[$n]}\"`"
       table+="|`printf \"%3s %s\" \"${n}.\" \"${display}\"`"
       [ $(($n % ${ncolumns})) = 0 ] && table+=$'\n'
@@ -1155,10 +1172,10 @@ function multiprompt {
     done
     printf $'\n%s:\n\n' "${1}" >> /dev/tty
     column -t -s "|" <<< "$table" >> /dev/tty
-    pmsg="$(get PROMPT 'Choose item or [ENTER] to confirm')"
     echo >> /dev/tty; prompt i "${pmsg}" </dev/tty >> /dev/tty
     [[ -z "$i" ]] && break # [ENTER] exits the loop
-    if ! valid_number 1 $n "$i"; then
+    selected="${selectmap[$i]}"
+    if [ -z "${selected}" ]; then
       echo >> /dev/tty
       echo "Sorry I don't understand \"$i\". Please select one of the" \
            "displayed items or press [ENTER] to confirm." >> /dev/tty
@@ -1166,11 +1183,14 @@ function multiprompt {
     fi
     # Execute prompt function in a subshell so if we recurse back to
     # multiprompt the locals here are not affected.
-    ${multiprompt_promptfns[$i]} "${multiprompt_fields[$i]}" "${multiprompt_promptmsgs[$i]}" "${multiprompt_labels[$i]}" </dev/tty >>/dev/tty
+    local field="${multiprompt_fields[$selected]}"
+    local label="${multiprompt_labels[$selected]}"
+    local promptfn="${multiprompt_promptfns[$selected]}"
+    local promptmsg="${multiprompt_promptmsgs[$selected]}"
+    ${promptfn} "${field}" "${promptmsg}" "${label}" </dev/tty >>/dev/tty
   done
-  declare -n fields=multiprompt_fields
-  declare -n labels=multiprompt_labels
-
+  fields=${multiprompt_fields[@]}
+  labels=${multiprompt_labels[@]}
 }
 # Hack, can't export globals so have to declare here and unset before using.
 declare -a fields
@@ -1183,6 +1203,8 @@ declare -a labels
 # Display a menu of choices to user, enabling them to change value by number.
 # How list items are displayed and how the data is collected from the user are
 # controlled by the field data descibed below in STDIN.
+#
+#                        ----- TODO FIX THESE DOCS -----
 #
 # ARGS:  - title: Text to show above the option listing.
 #
@@ -1215,8 +1237,6 @@ declare -a labels
 #              More detailed description dislpayed in help message.
 #
 # STDOUT:  Interactive.
-#
-#                        ----- TODO FIX DOCS BELOW THIS MARK -----
 #
 # VARS:  - Each field is exported as a variable with the user configured value.
 #
@@ -1285,6 +1305,7 @@ function argsprompt {
     local -a argsprompt_longopts
     local -a argsprompt_shortopts
     local -a argsprompt_groups
+    local -a argsprompt_predicates
     local -a argsprompt_promptfns
     local -a argsprompt_displayfns
   fi
@@ -1295,8 +1316,8 @@ function argsprompt {
     local field="${a[0]}"
     [ -n "${a[8]}" ] && pfn="${a[8]}" || pfn="${promptfn}"
     [ -n "${a[9]}" ] && dfn="${a[9]}" || dfn="${displayfn}"
-    argsprompt_fields["${i}"]="${field}"
-    argsprompt_defaults["${i}"]="${a[1]}"
+    argsprompt_fields[$i]="${field}"
+    argsprompt_defaults[$i]="${a[1]}"
     local immediate=0
     case "${a[1]}" in
       "=GROUP")
@@ -1313,14 +1334,15 @@ function argsprompt {
         [ -z "${!a[0]}" ] && export ${a[0]}="${a[1]}"
       ;;
     esac
-    argsprompt_immediate["${i}"]="${immediate}"
-    argsprompt_labels["${i}"]="${a[2]}"
-    argsprompt_prompts["${i}"]="${a[3]}"
-    argsprompt_longopts["${i}"]="${a[4]}"
-    argsprompt_shortopts["${i}"]="${a[5]}"
-    argsprompt_groups["${i}"]="${a[7]}"
-    argsprompt_promptfns["${i}"]="$pfn"
-    argsprompt_displayfns["${i}"]="$dfn"
+    argsprompt_immediate[$i]="${immediate}"
+    argsprompt_labels[$i]="${a[2]}"
+    argsprompt_prompts[$i]="${a[3]}"
+    argsprompt_longopts[$i]="${a[4]}"
+    argsprompt_shortopts[$i]="${a[5]}"
+    argsprompt_promptfns[$i]="$pfn"
+    argsprompt_displayfns[$i]="$dfn"
+    argsprompt_groups[$i]="$(sed 's/[[:space:]]*\([^\[[:space:]]*\)[^$]*$/\1/g' <<< "${a[7]}")"
+    argsprompt_predicates[$i]="$(sed 's/[^\[]*\([^$]*\)$/\1/g' <<< "${a[7]}")"
     i=$((i+1))
   done
 
@@ -1391,12 +1413,13 @@ function argsprompt {
   local argsprompt_mpconfig=""
   for i in "${!argsprompt_fields[@]}"; do
     if [ "${GROUP}" = "${argsprompt_groups[$i]}" ]; then
-      argsprompt_mpconfig+="${argsprompt_promptfns[${i}]}|"
-      argsprompt_mpconfig+="${argsprompt_displayfns[${i}]}|"
-      argsprompt_mpconfig+="${argsprompt_defaults[${i}]}|"
-      argsprompt_mpconfig+="${argsprompt_fields[${i}]}|"
-      argsprompt_mpconfig+="${argsprompt_labels[${i}]}|"
-      argsprompt_mpconfig+="${argsprompt_prompts[${i}]}|"
+      argsprompt_mpconfig+="${argsprompt_promptfns[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_displayfns[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_defaults[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_fields[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_labels[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_prompts[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_predicates[$i]}|"
       argsprompt_mpconfig+=$'\n'
     fi
   done
@@ -1581,7 +1604,9 @@ function checkboxprompt {
   PREPROCESS="cboxpreprocess" PROMPT="$promptmsg" multiprompt "$1" "$2"
   unset unchecked
   unset checked
-  for f in ${fields[@]}; do [[ "${!f}" = "y" ]] && checked+="$f " || unchecked+="$f "; done
+  for f in "${multiprompt_fields[@]}"; do
+    [[ "${!f}" = "y" ]] && checked+="$f " || unchecked+="$f "
+  done
   export checked
   export unchecked
 }
@@ -1636,18 +1661,18 @@ function radpreprocess {
 function radinit {
   # Figure out the $selected_index using the $selected_value and fields array.
   n=1
-  for field in ${fields[@]}; do
+  for field in "${multiprompt_fields[@]}"; do
     # If field value equals selected value, we found the $selected_index ($n).
-    [[ "$selected_value" = "${field}" ]] && break
+    [ "${selected_value}" = "${field}" ] && break
     n=$((n+1))
   done
-  if [[ ${#fields[@]} = $(($n-1)) ]]; then
+  if [[ ${#multiprompt_fields[@]} = $(($n-1)) ]]; then
     # There was no valid $selected_value so pick "1" and configure for it.
     n=1
-    export selected_value="${fields[$n]}"
+    export selected_value="${multiprompt_fields[$n]}"
   fi
   export selected_index="$n"
-  export selected_label="${labels[$n]}"
+  export selected_label="${multiprompt_labels[$n]}"
 }
 
 # -------------------------------------------
@@ -1964,6 +1989,11 @@ read -d "" addserver_CONFIG <<EOF
     Web server type | Web server type | \
     --httpd-type | -H | Web server type (currently only apache2). | \
     addserver_httpd | addserver_httpdtype_prompt
+
+  addserver_httpdconf | /etc/apache2 | \
+    Web server configuration directoy | Web server configuration directoy | \
+    --httpd-conf | -H | Web server configuration directoy. | \
+    addserver_httpd[addserver_httpdtype=apache2]
 
 EOF
 
