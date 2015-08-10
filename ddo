@@ -1,12 +1,21 @@
 #!/bin/bash -i
 
-SCRIPTHOME="$HOME/.ddo"
-SCRIPTPATH=$0
-PROGRAM=$(basename ${0})
-REMOTE=0
-unset user
+declare -r SCRIPTHOME="$HOME/.ddo"
+declare -r SCRIPTPATH=$0
+declare -r PROGRAM=$(basename ${0})
+declare user
 [ -n "$USERNAME" ] && user="$USERNAME"
 [ -n "$USER" ] && user="$USER"
+REMOTE=0
+declare -a PREFLIGHT_ERRORS
+declare -a PREFLIGHT_WARNINGS
+flightcheck=0
+USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
+SERVER_COMMANDS="ping init_vhost keyexchange_rsa apache2_scan mysql_scan"
+declare -a commands
+declare invalid_commands
+SED="sed" # needed because ns uses it, will be replaced in deps processing.
+OS="$(uname -o)"
 
 #------------------------------------------------------------------------------
 # Utilities
@@ -2376,9 +2385,9 @@ function command_help {
 # to read COLUMNS shell var.
 kill -s WINCH $$
 
+PM_INSTALL=$(ns package_ $OS)
+
 # Commands.
-USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
-SERVER_COMMANDS="ping init_vhost keyexchange_rsa apache2_scan mysql_scan"
 if [ "$1" = "--remote" ]; then
   REMOTE=1
   shift
@@ -2389,9 +2398,7 @@ fi
 DEPS="cat ssh awk grep sed wget git tbl groff tr"
 
 # Parse arguments.
-unset command
-declare -a commands
-i=0
+declare i=0
 while : ; do
   [[ -z "$1" ]] && break
   if [[ "$1" = "--" ]]; then
@@ -2407,10 +2414,9 @@ done
 [[ -n "$command" ]] && commands[$i]="$command"
 
 # Check the commands.
-unset invalid_commands
 for command_and_args in "${commands[@]}"; do
   acommand=($command_and_args)
-  command=${acommand[0]}
+  command="${acommand[0]}"
   if ! valid_command $command; then
     [[ -n "${invalid_commands[*]}" ]] && invalid_commands+=" "
     invalid_commands+=$command
@@ -2423,12 +2429,9 @@ function package_Cygwin {
 }
 
 # Collect deps.
-SED="sed" # needed because ns uses it, will be replaced in deps processing.
-OS="$(uname -o)"
-PM_INSTALL=$(ns package_ $OS)
 for command_and_args in "${commands[@]}"; do
   acommand=($command_and_args)
-  command=${acommand[0]}
+  command="${acommand[0]}"
   command_DEPS=$(ns $command _DEPS)
   if [[ -n "${!command_DEPS}" ]]; then
     [[ -n "${DEPS}" ]] && DEPS+=" "
@@ -2437,7 +2440,7 @@ for command_and_args in "${commands[@]}"; do
 done
 
 # Find missing deps.
-unset missing
+declare missing
 for dep in $DEPS; do
   prog DEP $dep || missing+="$dep "
 done
@@ -2511,9 +2514,6 @@ function preflight_help {
 #fi
 
 # Preflght checks.
-declare -a PREFLIGHT_ERRORS
-declare -a PREFLIGHT_WARNINGS
-flightcheck=0
 for command_and_args in "${commands[@]}"; do
   acommand=($command_and_args)
   command=${acommand[0]}
