@@ -11,11 +11,11 @@ declare -a PREFLIGHT_ERRORS
 declare -a PREFLIGHT_WARNINGS
 flightcheck=0
 USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
-SERVER_COMMANDS="ping init_vhost keyexchange_rsa apache2_scan mysql_scan"
+SERVER_COMMANDS="ping init_vhost keyexchange_rsa apache2_init mysql_scan"
 declare -a commands
 declare invalid_commands
 SED="sed" # needed because ns uses it, will be replaced in deps processing.
-OS="$(uname -o)"
+declare -r TTY="$(tty | sed -e "s/.*tty\(.*\)/\1/")"
 
 #------------------------------------------------------------------------------
 # Utilities
@@ -58,7 +58,7 @@ function get {
 function index {
   var="$1"
   deref="${!var}"
-  echo "var: ${deref[@]}" >> /dev/tty
+  echo "var: ${deref[@]}" >> "${TTY}"
   [ -n "${!var[$2]}" ] && printf "${!var[$2]}" || printf "$3"
 }
 
@@ -220,8 +220,8 @@ function sshcmd {
   [ -n "$user" ] && options+=" -l ${user}"
   options+=" ${host}"
   args="$(printf " \"%s\"" "$@")"
-  ${CAT} $SCRIPTPATH | ${SED} "s@#!/bin/bash -i@#!/bin/bash@g" | \
-    ${SSH} ${options} "bash /dev/stdin --remote $args"
+  #${SED} "s@#!/bin/bash -i@#!/bin/bash@g" |
+  ${SSH} ${options} "bash /dev/stdin --remote $args" <<< "$SCRIPTPATH"
 }
 
 # -------------------
@@ -286,7 +286,7 @@ function remote {
 #
 function prog {
   cmd="$(command -v $2)"
-  [ ! -f "$cmd" ] && cmd="$(which $2)" # $(command) doesn't work when alias.
+  [ ! -f "$cmd" ] && cmd="$(which $2 2> /dev/null)" # $(command) doesn't work when alias.
   [ ! -f "$cmd" ] && return -1 # $(command) and $(which) failed, bail.
   [ -x "$cmd" ]
   rval=$?
@@ -826,10 +826,10 @@ function prompt {
   [ -n "${DEFAULT}" ] && default="-i${DEFAULT}" || default=""
   if [[ -n "$*" ]]; then
     while [[ ! "$@" =~ (^| )"$result"($| ) ]]; do
-      read ${silent} ${default} -ep "$message: " result
+      read ${silent} ${default} -ep "$message: " result < ${TTY} >> ${TTY}
     done
   else
-    read ${silent} ${default} -ep "$message: " result
+    read ${silent} ${default} -ep "$message: " result < ${TTY} >> ${TTY}
   fi
   [ -n "${SILENT}" ] && echo
   export $resultvar="$result"
@@ -874,6 +874,7 @@ function ynprompt {
   [ "${ynresult}" = "y" ]
 }
 
+# TODO documentation.
 function textprompt {
   echo
   f="${1}"
@@ -882,6 +883,7 @@ function textprompt {
   [ -n "${v}" ] && export $1="${v}"
 }
 
+# TODO documentation.
 function pwprompt {
   echo
   while : ; do
@@ -1128,14 +1130,17 @@ function display {
 # See STDIN above for column definitions.
 #
 function multiprompt {
+
   local -a multiprompt_fields
   local -a multiprompt_labels
   local -a multiprompt_promptfns
   local -a multiprompt_displayfns
   local -a multiprompt_promptmsgs
+  local -a multiprompt_groups
   local -a multiprompt_predicates
   local pmsg="$(get PROMPT 'Choose item or [ENTER] to confirm')"
-  n=1
+
+  local n=1
   while read_array a; do
     multiprompt_promptfns[$n]="${a[0]}"
     multiprompt_displayfns[$n]="${a[1]}"
@@ -1143,11 +1148,12 @@ function multiprompt {
     multiprompt_labels[$n]="${a[4]}"
     multiprompt_promptmsgs[$n]="${a[5]}"
     # Prepare for awk by replacing "]\s*[" with "|" and removing "\s*" before the first "[".
+    multiprompt_groups[$n]="$(sed "s/[[:space:]]*\\([^\\[[:space:]]*\\)[^$]*$/\\1/g" <<< "${a[6]}")"
     multiprompt_predicates[$n]="$(sed 's/\][[:space:]]*\[/|/g' <<< "${a[6]}" | sed 's/[[:space:]]*\[/\[/g')"
     if [[ -z "${!a[3]}" ]]; then # Value not already set.
       if [[ "${a[2]}" = "=PROMPT" ]]; then
         # Magic value "=PROMPT" so promp user now.
-        ${a[0]} "${a[3]}" "${a[5]}" "${a[4]}" </dev/tty
+        ${a[0]} "${a[3]}" "${a[5]}" "${a[4]}" < "${TTY}"
       else
         # Otherwise just set the default value.
         export ${a[3]}="${a[2]}"
@@ -1155,6 +1161,7 @@ function multiprompt {
     fi
     n=$((n+1))
   done
+
   [[ -n "${INIT}" ]] && ${INIT}
   while : ; do
     local n=1
@@ -1163,31 +1170,36 @@ function multiprompt {
     local -a selectmap
     for i in "${!multiprompt_fields[@]}"; do
       local field="${multiprompt_fields[$i]}"
+      #echo "group check '${multiprompt_groups[$i]}' ~= '${GROUP}' (in field ${field})"
+      [ "${multiprompt_groups[$i]}" != "${GROUP}" ] && continue
       local j=2
       while : ; do
         local predicate="$(awk -F"[\\\\]|\\\\[|\\\\|]+" "{print \$${j}}" <<< "${multiprompt_predicates[$i]}")"
         [ -z "${predicate}" ] && break
         local testfield="$(sed 's/[[:space:]]*\([^\=[:space:]]*\)\=[^$]*/\1/g' <<< ${predicate})"
         local testvalue="$(sed 's/[^\=]*\=\([^$]*\)/\1/g' <<< ${predicate})"
-        echo "predicate check: '${!testfield}' != '${testvalue}' (in field ${testfield})"
+        #echo "predicate check: '${!testfield}' ~= '${testvalue}' (in field ${field}, predicate field ${testfield})"
         [ "${!testfield}" != "${testvalue}" ] && continue 2
         j=$((j+1))
       done
-      selectmap[$n]="$i"
-      display="`${multiprompt_displayfns[$n]} ${field} \"${multiprompt_labels[$n]}\" \"${multiprompt_promptmsgs[$n]}\"`"
+      local displayfn="${multiprompt_displayfns[$i]}"
+      local label="${multiprompt_labels[$i]}"
+      local promptmsg="${multiprompt_promptmsgs[$i]}"
+      local display="$(${displayfn} ${field} "${label}" "${promptmsg}")"
       table+="|`printf \"%3s %s\" \"${n}.\" \"${display}\"`"
       [ $(($n % ${ncolumns})) = 0 ] && table+=$'\n'
+      selectmap[$n]="$i"
       n=$((n+1))
     done
-    printf $'\n%s:\n\n' "${1}" >> /dev/tty
-    column -t -s "|" <<< "$table" >> /dev/tty
-    echo >> /dev/tty; prompt i "${pmsg}" </dev/tty >> /dev/tty
+    printf $'\n%s:\n\n' "${1}" >> "${TTY}"
+    column -t -s "|" <<< "$table" >> "${TTY}"
+    echo >> "${TTY}"; prompt i "${pmsg}" <"${TTY}" >> "${TTY}"
     [[ -z "$i" ]] && break # [ENTER] exits the loop
     selected="${selectmap[$i]}"
     if [ -z "${selected}" ]; then
-      echo >> /dev/tty
+      echo >> "${TTY}"
       echo "Sorry I don't understand \"$i\". Please select one of the" \
-           "displayed items or press [ENTER] to confirm." >> /dev/tty
+           "displayed items or press [ENTER] to confirm." >> "${TTY}"
       continue
     fi
     # Execute prompt function in a subshell so if we recurse back to
@@ -1196,7 +1208,7 @@ function multiprompt {
     local label="${multiprompt_labels[$selected]}"
     local promptfn="${multiprompt_promptfns[$selected]}"
     local promptmsg="${multiprompt_promptmsgs[$selected]}"
-    ${promptfn} "${field}" "${promptmsg}" "${label}" </dev/tty >>/dev/tty
+    ${promptfn} "${field}" "${promptmsg}" "${label}" <"${TTY}" >>"${TTY}"
   done
   fields=${multiprompt_fields[@]}
   labels=${multiprompt_labels[@]}
@@ -1308,13 +1320,11 @@ function argsprompt {
     local -a argsprompt_fields
     local -a argsprompt_defaults
     local -a argsprompt_required
-    local -a argsprompt_immediate
     local -a argsprompt_labels
     local -a argsprompt_prompts
     local -a argsprompt_longopts
     local -a argsprompt_shortopts
-    local -a argsprompt_groups
-    local -a argsprompt_predicates
+    local -a argsprompt_visibility
     local -a argsprompt_promptfns
     local -a argsprompt_displayfns
   fi
@@ -1326,32 +1336,27 @@ function argsprompt {
     [ -n "${a[8]}" ] && pfn="${a[8]}" || pfn="${promptfn}"
     [ -n "${a[9]}" ] && dfn="${a[9]}" || dfn="${displayfn}"
     argsprompt_fields[$i]="${field}"
-    argsprompt_defaults[$i]="${a[1]}"
-    local immediate=0
+    local dflt="${a[1]}"
     case "${a[1]}" in
       "=GROUP")
+        dflt=""
         [ -z "${a[8]}" ] && pfn="argsprompt_group_prompt"
       ;;
-      "=PROMPT")
-        immediate=1
-        argsprompt_required["${#argsprompt_required[@]}"]="${field}"
-      ;;
-      "=REQUIRED")
+      "=PROMPT"|"=REQUIRED")
         argsprompt_required["${#argsprompt_required[@]}"]="${field}"
       ;;
       *)
         [ -z "${!a[0]}" ] && export ${a[0]}="${a[1]}"
       ;;
     esac
-    argsprompt_immediate[$i]="${immediate}"
+    argsprompt_defaults[$i]="${dflt}"
     argsprompt_labels[$i]="${a[2]}"
     argsprompt_prompts[$i]="${a[3]}"
     argsprompt_longopts[$i]="${a[4]}"
     argsprompt_shortopts[$i]="${a[5]}"
+    argsprompt_visibility[$i]="${a[7]}"
     argsprompt_promptfns[$i]="$pfn"
     argsprompt_displayfns[$i]="$dfn"
-    argsprompt_groups[$i]="$(sed 's/[[:space:]]*\([^\[[:space:]]*\)[^$]*$/\1/g' <<< "${a[7]}")"
-    argsprompt_predicates[$i]="$(sed 's/[^\[]*\([^$]*\)$/\1/g' <<< "${a[7]}")"
     i=$((i+1))
   done
 
@@ -1390,17 +1395,6 @@ function argsprompt {
     [ $handled = 0 ] && fatal "bad arg: '$1'" # TODO better error handling
   done
 
-  # Do immediate prompting.
-  for i in "${!argsprompt_fields[@]}"; do
-    [ "${argsprompt_immediate[$i]}" = 0 ] && continue
-    local field="${argsprompt_fields[$i]}"
-    local prompt="${argsprompt_prompts[$i]}"
-    local label="${argsprompt_labels[$i]}"
-    while [ -z "${!field}" ]; do
-      "${argsprompt_promptfns[${i}]}" "${field}" "${prompt}" "${label}" </dev/tty
-    done
-  done
-
   # Check if we have all argsprompt_required fields.
   if [ $exitearly != 0 ]; then
     local hasrequired=1
@@ -1421,16 +1415,14 @@ function argsprompt {
   # Build a multiprompt config for the current group.
   local argsprompt_mpconfig=""
   for i in "${!argsprompt_fields[@]}"; do
-    if [ "${GROUP}" = "${argsprompt_groups[$i]}" ]; then
-      argsprompt_mpconfig+="${argsprompt_promptfns[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_displayfns[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_defaults[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_fields[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_labels[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_prompts[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_predicates[$i]}|"
-      argsprompt_mpconfig+=$'\n'
-    fi
+    argsprompt_mpconfig+="${argsprompt_promptfns[$i]}|"
+    argsprompt_mpconfig+="${argsprompt_displayfns[$i]}|"
+    argsprompt_mpconfig+="${argsprompt_defaults[$i]}|"
+    argsprompt_mpconfig+="${argsprompt_fields[$i]}|"
+    argsprompt_mpconfig+="${argsprompt_labels[$i]}|"
+    argsprompt_mpconfig+="${argsprompt_prompts[$i]}|"
+    argsprompt_mpconfig+="${argsprompt_visibility[$i]}|"
+    argsprompt_mpconfig+=$'\n'
   done
 
   # Do multiprompt until all required values are supplied.
@@ -1864,6 +1856,46 @@ function command_ping {
 }
 
 #------------------------------------------------------------------------------
+# SERVER COMMAND: apache2_init
+#------------------------------------------------------------------------------
+
+apache2_init_DEPS="apache2ctl a2ensite a2dissite a2enmod a2dismod"
+package_Ubuntu_apache2ctl="apache2"
+package_Ubuntu_a2ensite="apache2"
+package_Ubuntu_a2dissite="apache2"
+package_Ubuntu_a2enmod="apache2"
+package_Ubuntu_a2dismod="apache2"
+
+function preflight_apache2_init {
+  if [ ! -d "$1" ]; then
+    PREFLGHT_ERROR="Cannot read Apache2 config directory '$1'."
+    return 1
+  fi
+  local -a sudo_missing
+  for dep in ${apache2_init_DEPS}; do
+    local varname="$(${AWK} '{print toupper($0)}' <<< "${dep}")"
+    local line="$USER ALL = NOPASSWD:${!varname}"
+    grep "${line}" /etc/sudoers || sudo_missing[${#sudo_missing[@]}]="${line}"
+  done
+  if [ ${#sudo_missing[@]} > 0 ]; then
+    printf $'%s\n' "${sudo_missing[@]}"
+    # TODO print the sudo_missing list of lines.
+    if ynprompt "Add these lines to /etc/sudoers?" >> "${TTY}"; then
+      # TODO be more careful about existing sudoers.new if exists.
+      local missing="$(printf $'%s\n' "${sudo_missing[@]}")"
+      sed "/# User privilege specification/${missing}\n" /etc/sudoers | sudo tee /etc/sudoers.new
+    fi
+  fi
+  return 0
+}
+
+function command_apache2_init {
+  echo "$1"
+  return 0
+}
+
+
+#------------------------------------------------------------------------------
 # SERVER COMMAND: init_vhost
 #------------------------------------------------------------------------------
 
@@ -2126,6 +2158,21 @@ EOF
     fatal "Can't reach server, please check settings and try again."
   fi
 
+  # Init remote.
+  printf "Initialzing ${addserver_httpdtype} server... "
+  case "${addserver_httpdtype}" in
+    "apache2")
+      if result="$(remote "${addserver_alias}" apache2_init "${addserver_httpdconf}")"; then
+        printf "${result}"$' [OK]\n'
+      else
+        printf $'[ERROR]\n'
+      fi
+    ;;
+    "nginx")
+      # TODO nginx support.
+    ;;
+  esac
+
   # Report success.
   echo
   FORMAT="rblx" MARGIN="3" HEADER_FORMAT="lb" ROWSPACING="1" tableformat <<EOF
@@ -2378,12 +2425,28 @@ function command_help {
 }
 
 #------------------------------------------------------------------------------
+# OS specific package management
+#------------------------------------------------------------------------------
+
+# Package manager function for Cygwin.
+function package_Cygwin {
+  echo " - Please use Cygwin setup.exe to install package \"$*\"."
+}
+
+# Package manager function for Ubuntu.
+function package_Ubuntu {
+  sudo apt-get install "$*"
+}
+
+#------------------------------------------------------------------------------
 # Initialization.
 #------------------------------------------------------------------------------
 
 # This and the -i switch in the hashbang at the top of the file are necessary
 # to read COLUMNS shell var.
 kill -s WINCH $$
+
+prog LSB_RELEASE lsb_release && OS="$(lsb_release -si)" || OS="$(uname -o)"
 
 PM_INSTALL=$(ns package_ $OS)
 
@@ -2422,11 +2485,6 @@ for command_and_args in "${commands[@]}"; do
     invalid_commands+=$command
   fi
 done
-
-# Package manager function for Cygwin.
-function package_Cygwin {
-  echo " - Please use Cygwin setup.exe to install package \"$*\"."
-}
 
 # Collect deps.
 for command_and_args in "${commands[@]}"; do
