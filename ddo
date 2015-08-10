@@ -3,6 +3,11 @@
 declare -r SCRIPTHOME="$HOME/.ddo"
 declare -r SCRIPTPATH=$0
 declare -r PROGRAM=$(basename ${0})
+declare -r TTY="$(tty | sed -e "s/.*tty\(.*\)/\1/")"
+declare -r TEMPDIR="$(mktemp -d --suffix=-ddo)"
+declare -r USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
+declare -r SERVER_COMMANDS="ping init_vhost keyexchange_rsa apache2_init mysql_scan"
+
 declare user
 [ -n "$USERNAME" ] && user="$USERNAME"
 [ -n "$USER" ] && user="$USER"
@@ -10,16 +15,13 @@ REMOTE=0
 declare -a PREFLIGHT_ERRORS
 declare -a PREFLIGHT_WARNINGS
 flightcheck=0
-USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
-SERVER_COMMANDS="ping init_vhost keyexchange_rsa apache2_init mysql_scan"
 declare -a commands
 declare invalid_commands
 SED="sed" # needed because ns uses it, will be replaced in deps processing.
-declare -r TTY="$(tty | sed -e "s/.*tty\(.*\)/\1/")"
 
 #------------------------------------------------------------------------------
 # Utilities
-#------------------------------------------------------------------------------
+#------------------------s-----------------------------------------------------
 
 # ---------------------
 # get(varname, default)
@@ -142,6 +144,15 @@ function loadserver {
   n=$(ns ${1} _options); export $n="${!n}"
   # TODO test required values and check alias against $1
   return 0
+}
+
+# TODO documentation.
+function makepipe {
+  local pipe="$TEMPDIR/$1"
+  mkfifo "${pipe}"
+  local rval=$?
+  printf "${pipe}"
+  return ${rval}
 }
 
 # -------------------------------------------------------
@@ -1034,6 +1045,8 @@ function display {
 # How list items are displayed and how the data is collected from the user are
 # controlled by the field data descibed below in STDIN.
 #
+#                        ----- TODO NEEDS REVIEW AND UPDATE -----
+#
 # ARGS:  - title: Text to show above the option listing.
 #
 #        - num_columns: Number of columns in the listing. Optional. Default=3.
@@ -1081,6 +1094,10 @@ function display {
 #              ------------------------
 #              Message to display when prompting for a value. Normally used
 #              in prompt mode, `echo`'d by the promptfn.
+#
+#              [column 7] visibility
+#              ---------------------
+#              TODO
 #
 # STDOUT:  Interactive.
 #
@@ -2446,7 +2463,7 @@ function package_Ubuntu {
 # to read COLUMNS shell var.
 kill -s WINCH $$
 
-prog LSB_RELEASE lsb_release && OS="$(lsb_release -si)" || OS="$(uname -o)"
+prog LSB_RELEASE lsb_release && OS="$(${LSB_RELEASE} -si)" || OS="$(uname -o)"
 
 PM_INSTALL=$(ns package_ $OS)
 
@@ -2555,11 +2572,20 @@ function preflight_help {
   return 0
 }
 
+# Set up the temporary directory.
+[ ! -d "$TEMPDIR" ] &&
+  fatal "Could not create temporary directory, exiting."
+trap 'rm -rf "$TEMPDIR"' EXIT INT TERM HUP
+echo "TESTVALUE" > "$TEMPDIR/writecheck"
+[ -f "$TEMPDIR/writecheck" ] &&
+  grep "TESTVALUE" "$TEMPDIR/writecheck" >> /dev/null &&
+  rm "$TEMPDIR/writecheck" ||
+  fatal "Could not write to temporary directory, exiting."
+
 # Did we understand all the commands?
 [[ -z "$commands[*]" ]] && fatal "No command given"
 [[ -n "${invalid_commands[*]}" ]] && \
   fatal "Unknown command(s) \"$invalid_commands\". Try \`$PROGRAM help\`."
-
 
 # UTF-8 autodetect
 #if [ $REMOTE != 1 ]; then
