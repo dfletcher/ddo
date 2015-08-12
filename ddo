@@ -4,9 +4,10 @@ declare -r SCRIPTHOME="$HOME/.ddo"
 declare -r SCRIPTPATH=$0
 declare -r PROGRAM=$(basename ${0})
 declare -r TTY="$(tty | sed -e "s/.*tty\(.*\)/\1/")"
-declare -r TEMPDIR="$(mktemp -d --suffix=-ddo)"
+declare -r TEMPDIR="$(mktemp -d ddo.XXXXXXXXXX)"
 declare -r USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
 declare -r SERVER_COMMANDS="ping init_vhost keyexchange_rsa apache2_init mysql_scan"
+declare -r DEPS="dd od tee cat ssh awk grep sed wget git tbl groff tr"
 
 declare user
 [ -n "$USERNAME" ] && user="$USERNAME"
@@ -21,7 +22,7 @@ SED="sed" # needed because ns uses it, will be replaced in deps processing.
 
 #------------------------------------------------------------------------------
 # Utilities
-#------------------------s-----------------------------------------------------
+#------------------------------------------------------------------------------
 
 # ---------------------
 # get(varname, default)
@@ -54,7 +55,7 @@ SED="sed" # needed because ns uses it, will be replaced in deps processing.
 #
 function get {
   var="$1"
-  [ -n "${!var}" ] && printf "${!var}" || printf "$2"
+  [ -n "${!var}" ] && echo "${!var}" || echo "$2"
 }
 
 function index {
@@ -230,9 +231,14 @@ function sshcmd {
   [ -f "$identity" ] && options+=" -i ${identity}"
   [ -n "$user" ] && options+=" -l ${user}"
   options+=" ${host}"
-  args="$(printf " \"%s\"" "$@")"
-  #${SED} "s@#!/bin/bash -i@#!/bin/bash@g" |
-  ${SSH} ${options} "bash /dev/stdin --remote $args" <<< "$SCRIPTPATH"
+  # TODO: still deciding which works better here, leaning towards %q.
+  #local args="$(printf " \"%s\"" "$@")"
+  local args="$(printf " %q" "$@")"
+  (
+    echo "#!/bin/bash -i" # Rewriting top of file so re-add the hashbang.
+    echo "REMOTE_ARGUMENTS=( ${args} )" # Pass args manually.
+    cat "$SCRIPTPATH" # Rest of script.
+  ) | ${SSH} -C ${options} /bin/bash
 }
 
 # -------------------
@@ -240,6 +246,8 @@ function sshcmd {
 # -------------------
 #
 # Utility: Remote access.
+#
+#              ---- TODO MORE COMPLETE, UPDATE THESE DOCS ----
 #
 # ARGS:  - server: Server alias.
 #
@@ -261,11 +269,14 @@ function sshcmd {
 #   remote mysite ping # Prints `uname -a` from the server.
 #
 function remote {
-  server="${1}"; shift
+  local -r server="${1}"; shift
   loadserver "${server}" || return 255
-  IDENTITY_FILE="$(get $(ns ${server} _identity))" \
-  SSH_OPTIONS="$(get $(ns ${server} _sshopts))" \
-    sshcmd "$(get $(ns ${server} _host))" "$(get $(ns ${server} _user))" "$@"
+  local -r identity="$(get $(ns ${server} _identity))"
+  local -r options="$(get $(ns ${server} _sshopts))"
+  local -r user="$(get $(ns ${server} _user))"
+  local -r host="$(get $(ns ${server} _host))"
+  IDENTITY_FILE="${identity}" SSH_OPTIONS="${options}" \
+    sshcmd "${host}" "${user}" --remote "$@"
 }
 
 # -----------------------
@@ -1884,6 +1895,7 @@ package_Ubuntu_a2enmod="apache2"
 package_Ubuntu_a2dismod="apache2"
 
 function preflight_apache2_init {
+  echo "+INFO testing 123"
   if [ ! -d "$1" ]; then
     PREFLGHT_ERROR="Cannot read Apache2 config directory '$1'."
     return 1
@@ -1894,19 +1906,21 @@ function preflight_apache2_init {
     local line="$USER ALL = NOPASSWD:${!varname}"
     grep "${line}" /etc/sudoers || sudo_missing[${#sudo_missing[@]}]="${line}"
   done
-  if [ ${#sudo_missing[@]} > 0 ]; then
-    printf $'%s\n' "${sudo_missing[@]}"
-    # TODO print the sudo_missing list of lines.
-    if ynprompt "Add these lines to /etc/sudoers?" >> "${TTY}"; then
-      # TODO be more careful about existing sudoers.new if exists.
-      local missing="$(printf $'%s\n' "${sudo_missing[@]}")"
-      sed "/# User privilege specification/${missing}\n" /etc/sudoers | sudo tee /etc/sudoers.new
-    fi
-  fi
+  printf $'+INFO  - %s\n' "${sudo_missing[@]}"
+  #if [ ${#sudo_missing[@]} > 0 ]; then
+  #  # TODO print the sudo_missing list of lines.
+  #  if ynprompt "Add these lines to /etc/sudoers?" < ${TTY} >> ${TTY}; then
+  #    # TODO be more careful about existing sudoers.new if exists.
+  #    local missing="$(printf $'%s\n' "${sudo_missing[@]}")"
+  #    sed "/# User privilege specification/${missing}\n" /etc/sudoers |
+  #      sudo ${TEE} /etc/sudoers.new < ${TTY} >> ${TTY}
+  #  fi
+  #fi
   return 0
 }
 
 function command_apache2_init {
+  echo "+INFO testing 456"
   echo "$1"
   return 0
 }
@@ -2179,11 +2193,8 @@ EOF
   printf "Initialzing ${addserver_httpdtype} server... "
   case "${addserver_httpdtype}" in
     "apache2")
-      if result="$(remote "${addserver_alias}" apache2_init "${addserver_httpdconf}")"; then
-        printf "${result}"$' [OK]\n'
-      else
-        printf $'[ERROR]\n'
-      fi
+      remote "${addserver_alias}" apache2_init "${addserver_httpdconf}" &&
+        printf "${result}"$' [OK]\n' || printf $'[ERROR]\n'
     ;;
     "nginx")
       # TODO nginx support.
@@ -2428,6 +2439,11 @@ function help_help {
 EOL
 }
 
+function preflight_help {
+  PREFLGHT_ERROR="This is an fatal."
+  return 0
+}
+
 function command_help {
   if test -z "$1"; then
     usage
@@ -2459,39 +2475,35 @@ function package_Ubuntu {
 # Initialization.
 #------------------------------------------------------------------------------
 
-# This and the -i switch in the hashbang at the top of the file are necessary
-# to read COLUMNS shell var.
-kill -s WINCH $$
-
 prog LSB_RELEASE lsb_release && OS="$(${LSB_RELEASE} -si)" || OS="$(uname -o)"
 
 PM_INSTALL=$(ns package_ $OS)
 
-# Commands.
-if [ "$1" = "--remote" ]; then
-  REMOTE=1
-  shift
-fi
-[ $REMOTE = 1 ] && COMMANDS="${SERVER_COMMANDS}" || COMMANDS="${USER_COMMANDS}"
-
-# Common deps.
-DEPS="cat ssh awk grep sed wget git tbl groff tr"
+# This and the -i switch in the hashbang at the top of the file are necessary
+# to read COLUMNS shell var.
+kill -s WINCH $$
 
 # Parse arguments.
+declare arguments=$(get REMOTE_ARGUMENTS)
+[ -n "${REMOTE_ARGUMENTS}" ] &&
+  arguments=( "${REMOTE_ARGUMENTS[@]}" ) ||
+  arguments=( "$@" )
+
 declare i=0
-while : ; do
-  [[ -z "$1" ]] && break
-  if [[ "$1" = "--" ]]; then
-    [[ -n "$command" ]] && commands[$i]="$command"
+declare command
+for argument in "${arguments[@]}"; do
+  if [ "${argument}" = "--remote" ]; then
+    REMOTE=1
+  elif [ "${argument}" = "--" ]; then
+    [ -n "$command" ] && commands[$i]="$command"
     i=$((i+1))
     unset command
-    shift
-    continue
+  else
+    [ -z "$command" ] && command="$argument" || command+=" \"$argument\""
   fi
-  [[ -z "$command" ]] && command="$1" || command+=" \"$1\""
-  shift
 done
-[[ -n "$command" ]] && commands[$i]="$command"
+[ -n "$command" ] && commands[$i]="$command"
+[ $REMOTE = 1 ] && COMMANDS="${SERVER_COMMANDS}" || COMMANDS="${USER_COMMANDS}"
 
 # Check the commands.
 for command_and_args in "${commands[@]}"; do
@@ -2504,19 +2516,20 @@ for command_and_args in "${commands[@]}"; do
 done
 
 # Collect deps.
+declare deps="${DEPS}"
 for command_and_args in "${commands[@]}"; do
   acommand=($command_and_args)
   command="${acommand[0]}"
   command_DEPS=$(ns $command _DEPS)
-  if [[ -n "${!command_DEPS}" ]]; then
-    [[ -n "${DEPS}" ]] && DEPS+=" "
-    DEPS+="${!command_DEPS}"
+  if [ -n "${!command_DEPS}" ]; then
+    [ -n "${deps}" ] && deps+=" "
+    deps+="${!command_DEPS}"
   fi
 done
 
 # Find missing deps.
 declare missing
-for dep in $DEPS; do
+for dep in "${deps[@]}"; do
   prog DEP $dep || missing+="$dep "
 done
 
@@ -2529,7 +2542,7 @@ if [ -n "$missing" ]; then
   unset packages
   for item in $missing; do
     package=$(ns package_ $OS _ $item)
-    if [[ -z "${!package}" ]] || ! func ${PM_INSTALL}; then
+    if [ -z "${!package}" ] || ! func ${PM_INSTALL}; then
       echo " - $item: no suggestion on how to install, sorry"
       continue
     fi
@@ -2560,17 +2573,12 @@ fi
 
 # Process deps.
 prog _AWK awk # temp need for loop below.
-for dep in $DEPS; do
+for dep in ${deps}; do
   depname=`echo $dep | $_AWK '{print toupper($0)}'`
   prog $depname $dep
 done
 unset _AWK
 unset missing
-
-function preflight_help {
-  PREFLGHT_ERROR="This is an fatal."
-  return 0
-}
 
 # Set up the temporary directory.
 [ ! -d "$TEMPDIR" ] &&
@@ -2583,8 +2591,8 @@ echo "TESTVALUE" > "$TEMPDIR/writecheck"
   fatal "Could not write to temporary directory, exiting."
 
 # Did we understand all the commands?
-[[ -z "$commands[*]" ]] && fatal "No command given"
-[[ -n "${invalid_commands[*]}" ]] && \
+[ -z "$commands[*]" ] && fatal "No command given"
+[ -n "${invalid_commands[*]}" ] && \
   fatal "Unknown command(s) \"$invalid_commands\". Try \`$PROGRAM help\`."
 
 # UTF-8 autodetect
