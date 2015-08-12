@@ -231,14 +231,14 @@ function sshcmd {
   [ -f "$identity" ] && options+=" -i ${identity}"
   [ -n "$user" ] && options+=" -l ${user}"
   options+=" ${host}"
-  # TODO: still deciding which works better here, leaning towards %q.
-  #local args="$(printf " \"%s\"" "$@")"
-  local args="$(printf " %q" "$@")"
-  (
-    echo "#!/bin/bash -i" # Rewriting top of file so re-add the hashbang.
-    echo "REMOTE_ARGUMENTS=( ${args} )" # Pass args manually.
-    cat "$SCRIPTPATH" # Rest of script.
-  ) | ${SSH} -C ${options} /bin/bash
+  local script="REMOTE_ARGUMENTS=( $(printf " %q" "$@") )"$'\n'
+  script+="$(cat "$SCRIPTPATH")"$'\n'
+  # So far this rather clumsy method of passing the entire script as the
+  # command string is the only way to achieve copying this file to the server
+  # and running it in a single shot. Attempts to do it using stdin break
+  # SSH's pty and then prompting functions and sudo fail to work on remote.
+  # Still looking for a nicer way to achieve it.
+  ${SSH} -Ctt ${options} "${script}"
 }
 
 # -------------------
