@@ -608,7 +608,7 @@ function paragraph {
 function usage {
   unset helpdata
   for cmd in $COMMANDS; do
-    helpdata+="$cmd|$($(ns shorthelp_ $cmd))"$'\n'
+    helpdata+="$cmd|$($(ns $cmd _shorthelp))"$'\n'
   done
   echo -e "Usage: $PROGRAM [GLOBAL ARGUMENTS] COMMAND (COMMAND ARGUMENTS) [-- COMMAND (COMMAND ARGUMENTS)]...\n"
   FORMAT="llx" MARGIN="3" tableformat <<EOF
@@ -696,7 +696,7 @@ function longhelp {
     Synopsis
     _
     Command: | $command
-    Summary: | $($(ns shorthelp_ $command))
+    Summary: | $($(ns $command _shorthelp))
 EOF
 
   echo
@@ -1874,11 +1874,11 @@ function preflight_sudo {
 # SERVER COMMAND: ping
 #------------------------------------------------------------------------------
 
-function preflight_ping {
+function ping_preflight {
   return 0
 }
 
-function command_ping {
+function ping_command {
   uname -a
   return 0
 }
@@ -1894,7 +1894,7 @@ package_Ubuntu_a2dissite="apache2"
 package_Ubuntu_a2enmod="apache2"
 package_Ubuntu_a2dismod="apache2"
 
-function preflight_apache2_init {
+function apache2_init_preflight {
   echo "+INFO testing 123"
   if [ ! -d "$1" ]; then
     PREFLGHT_ERROR="Cannot read Apache2 config directory '$1'."
@@ -1919,7 +1919,7 @@ function preflight_apache2_init {
   return 0
 }
 
-function command_apache2_init {
+function apache2_init_command {
   echo "+INFO testing 456"
   echo "$1"
   return 0
@@ -1930,12 +1930,12 @@ function command_apache2_init {
 # SERVER COMMAND: init_vhost
 #------------------------------------------------------------------------------
 
-function preflight_init_vhost {
+function init_vhost_preflight {
   preflight_sudo || return 1
   return 0
 }
 
-function command_init_vhost {
+function init_vhost_command {
   echo
 }
 
@@ -1943,15 +1943,15 @@ function command_init_vhost {
 # USER COMMAND: init
 #------------------------------------------------------------------------------
 
-function shorthelp_init {
+function init_shorthelp {
   echo "Alias for init7 currently. Will change to init8."
 }
 
-function help_init {
+function init_help {
   help_init7
 }
 
-function command_init {
+function init_command {
   init7 $@
 }
 
@@ -1959,15 +1959,15 @@ function command_init {
 # USER COMMAND: init7
 #------------------------------------------------------------------------------
 
-function shorthelp_init7 {
+function init7_shorthelp {
   echo "Create a Drupal 7 installation."
 }
 
-function help_init7 {
+function init7_help {
   echo "TODO help_init7"
 }
 
-function command_init7 {
+function init7_command {
   echo "init7 ARGS: $@"
   ERROR=`init_init`
   [ $? != 0 ] && fatal "Initialization error: $ERROR"
@@ -1978,15 +1978,15 @@ function command_init7 {
 # USER COMMAND: init8
 #------------------------------------------------------------------------------
 
-function shorthelp_init8 {
+function init8_shorthelp {
   echo "Create a Drupal 8 installation."
 }
 
-function help_init8 {
+function init8_help {
   echo "TODO help_init8"
 }
 
-function command_init8 {
+function init8_command {
   ERROR=`init_init`
   [ $? != 0 ] && fatal "Initialization error: $ERROR"
   echo "init8 ARGS: $@"
@@ -1996,15 +1996,15 @@ function command_init8 {
 # USER COMMAND: servers
 #------------------------------------------------------------------------------
 
-function shorthelp_servers {
+function servers_shorthelp {
   echo "List available servers."
 }
 
-function help_servers {
+function servers_help {
   echo "TODO help_servers"
 }
 
-function command_servers {
+function servers_command {
   ls "$SCRIPTHOME/servers" | sed 's/.server//g'
 }
 
@@ -2090,17 +2090,17 @@ function addserver_httpd_display {
   echo "$2: ${addserver_httpdtype}"
 }
 
-function shorthelp_addserver {
+function addserver_shorthelp {
   echo "Add a new server."
 }
 
-function help_addserver {
+function addserver_help {
   argshelp $1 "$PROGRAM $1 (ARGUMENTS)" <<EOL
   TODO addserver help
 EOL
 }
 
-function preflight_addserver {
+function addserver_preflight {
 
   # Init ~/.ddo
   if ! init_init; then
@@ -2122,7 +2122,7 @@ function preflight_addserver {
   return 0
 }
 
-function command_addserver {
+function addserver_command {
 
   # Process arguments.
   PROMPT="Choose item to edit or press [ENTER] to test access and save" \
@@ -2229,7 +2229,7 @@ EOF
 # SERVER COMMAND: keyexchange_rsa
 #------------------------------------------------------------------------------
 
-function command_keyexchange_rsa {
+function keyexchange_rsa_command {
 
   # Parse the key.
   key="$1"
@@ -2277,11 +2277,11 @@ read -d "" keyexchange_CONFIG << EOF
 
 EOF
 
-function shorthelp_keyexchange {
+function keyexchange_shorthelp {
   echo "Exchange SSH keys with a server."
 }
 
-function help_keyexchange {
+function keyexchange_help {
   argshelp $1 "$PROGRAM $1 (ARGUMENTS)" <<EOL
   TODO keyexchange help
 EOL
@@ -2340,7 +2340,7 @@ function keyexchange {
   fi
 }
 
-function command_keyexchange {
+function keyexchange_command {
   result=$(keyexchange $@) &&
     echo "Key exchange success: $result" ||
     fatal "Key exchange failed: $result"
@@ -2350,15 +2350,15 @@ function command_keyexchange {
 # USER COMMAND: modserver
 #------------------------------------------------------------------------------
 
-function shorthelp_modserver {
+function modserver_shorthelp {
   echo "Modify an existing server."
 }
 
-function help_modserver {
+function modserver_help {
   echo "TODO help_modserver"
 }
 
-function command_modserver {
+function modserver_command {
   echo "modserver ARGS: $@"
 }
 
@@ -2366,17 +2366,17 @@ function command_modserver {
 # USER COMMAND: delserver
 #------------------------------------------------------------------------------
 
-function shorthelp_delserver {
+function delserver_shorthelp {
   echo "Remove a server."
 }
 
-function help_delserver {
+function delserver_help {
   longhelp $1 "$PROGRAM $1 [SERVERNAME]" <<EOL
   Delete a server by alias. TODO WILL THIS AFFECT EXISTING PROJECTS?
 EOL
 }
 
-function command_delserver {
+function delserver_command {
   echo "delserver ARGS: $@"
 }
 
@@ -2384,11 +2384,11 @@ function command_delserver {
 # USER COMMAND: update
 #------------------------------------------------------------------------------
 
-function shorthelp_update {
+function update_shorthelp {
   echo "Update Drupal project information from updates.drupal.org."
 }
 
-function help_update {
+function update_help {
   echo "TODO help_update"
 }
 
@@ -2409,7 +2409,7 @@ function _update_modules {
 }
 #_update_modules
 
-function command_update {
+function update_command {
   rm -f $SCRIPTHOME/cache/project.xml
   wget http://updates.drupal.org/release-history/project-list/all -O $SCRIPTHOME/cache/project.xml
   _update_modules
@@ -2424,7 +2424,7 @@ help_DEPS="tr fmt"
 package_Cygwin_tr="coreutils"
 package_Cygwin_fmt="coreutils"
 
-function shorthelp_help {
+function help_shorthelp {
   echo "Display a help message."
 }
 
@@ -2439,12 +2439,12 @@ function help_help {
 EOL
 }
 
-function preflight_help {
+function help_preflight {
   PREFLGHT_ERROR="This is an fatal."
   return 0
 }
 
-function command_help {
+function help_command {
   if test -z "$1"; then
     usage
     exit 0
@@ -2453,7 +2453,7 @@ function command_help {
     if ! valid_command "$1"; then
       usage "No help for unknown command \"$1\""; exit -3;
     fi
-    $(ns help_ $1) $1
+    $(ns $1 _help) $1
   fi
 }
 
@@ -2499,7 +2499,7 @@ for argument in "${arguments[@]}"; do
     i=$((i+1))
     unset command
   else
-    [ -z "$command" ] && command="$argument" || command+=" \"$argument\""
+    [ -z "$command" ] && command="$argument" || command+=`printf " %q" "$argument"`
   fi
 done
 [ -n "$command" ] && commands[$i]="$command"
@@ -2607,12 +2607,11 @@ echo "TESTVALUE" > "$TEMPDIR/writecheck"
 
 # Preflght checks.
 for command_and_args in "${commands[@]}"; do
-  acommand=($command_and_args)
-  command=${acommand[0]}
-  if func $(ns preflight_ $command); then
+  read command args <<< "$command_and_args"
+  preflight=$(ns $command _preflight)
+  if func ${preflight}; then
     unset PREFLGHT_ERROR
-    preflight="`sed s/^${command}/preflight_${command}/g <<< \"$command_and_args\"`"
-    eval $preflight
+    ${preflight} ${args}
     result=$?
     flightcheck=$(( $flightcheck | $result ))
     [[ $result ]] && [[ -n "$PREFLGHT_ERROR" ]] && PREFLIGHT_ERRORS[${#PREFLIGHT_ERRORS[@]}]="$PREFLGHT_ERROR"
@@ -2626,5 +2625,7 @@ fi
 
 # Main.
 for command_and_args in "${commands[@]}"; do
-  eval command_${command_and_args}
+  read command args <<< "$command_and_args"
+  invoke_command=$(ns $command _command)
+  ${invoke_command} ${args}
 done
