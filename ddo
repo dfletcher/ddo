@@ -1,5 +1,9 @@
 #!/bin/bash -i
 
+# TODO: general script header docs
+
+# TODO: developer documentation: command and preflight function patterns.
+
 declare -r SCRIPTHOME="$HOME/.ddo"
 declare -r SCRIPTPATH=$0
 declare -r PROGRAM=$(basename ${0})
@@ -2608,15 +2612,17 @@ echo "TESTVALUE" > "$TEMPDIR/writecheck"
 # Preflght checks.
 for command_and_args in "${commands[@]}"; do
   read command args <<< "$command_and_args"
-  preflight=$(ns $command _preflight)
-  if func ${preflight}; then
+  preflightfns=( $(ns $command _preflight _ $OS) $(ns $command _preflight) )
+  for preflightfn in ${preflightfns[@]}; do
+    func ${preflightfn} || continue
     unset PREFLGHT_ERROR
-    ${preflight} ${args}
+    ${preflightfn} ${args}
     result=$?
     flightcheck=$(( $flightcheck | $result ))
     [[ $result ]] && [[ -n "$PREFLGHT_ERROR" ]] && PREFLIGHT_ERRORS[${#PREFLIGHT_ERRORS[@]}]="$PREFLGHT_ERROR"
     [[ $result ]] && [[ -n "$PREFLIGHT_WARNING" ]] && PREFLIGHT_WARNINGS[${#PREFLIGHT_WARNINGS[@]}]="$PREFLIGHT_WARNING"
-  fi
+    break; # Only invoke 1 version of preflight func.
+  done
 done
 if [[ $flightcheck != 0 ]]; then
   echo "${PREFLIGHT_ERRORS[*]}"
@@ -2626,6 +2632,10 @@ fi
 # Main.
 for command_and_args in "${commands[@]}"; do
   read command args <<< "$command_and_args"
-  invoke_command=$(ns $command _command)
-  ${invoke_command} ${args}
+  commandfns=( $(ns $command _command _ $OS) $(ns $command _command) )
+  for commandfn in ${commandfns[@]}; do
+    func ${commandfn} || continue
+    ${commandfn} ${args}
+    break; # Only invoke 1 version of command func.
+  done
 done
