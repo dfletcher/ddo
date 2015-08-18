@@ -8,10 +8,11 @@ declare -r SCRIPTHOME="$HOME/.ddo"
 declare -r SCRIPTPATH=$0
 declare -r PROGRAM=$(basename ${0})
 declare -r TTY="$(tty | sed -e "s/.*tty\(.*\)/\1/")"
-declare -r TEMPDIR="$(mktemp -d ddo.XXXXXXXXXX)"
 declare -r USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
 declare -r SERVER_COMMANDS="ping init_vhost keyexchange_rsa apache2_init mysql_scan"
 declare -r DEPS="dd od tee cat ssh awk grep sed wget git tbl groff tr"
+declare -r TEMPDIR="$(mktemp -d /tmp/ddo.XXXXXXXXXX)"
+trap 'rm -rf "$TEMPDIR"' EXIT INT TERM HUP
 
 declare user
 [ -n "$USERNAME" ] && user="$USERNAME"
@@ -1240,7 +1241,7 @@ function multiprompt {
     local label="${multiprompt_labels[$selected]}"
     local promptfn="${multiprompt_promptfns[$selected]}"
     local promptmsg="${multiprompt_promptmsgs[$selected]}"
-    ${promptfn} "${field}" "${promptmsg}" "${label}" <"${TTY}" >>"${TTY}"
+    ${promptfn} "${field}" "${promptmsg}" "${label}" <"${TTY}" >>"${TTY}" || return $?
   done
   fields=${multiprompt_fields[@]}
   labels=${multiprompt_labels[@]}
@@ -1248,6 +1249,226 @@ function multiprompt {
 # Hack, can't export globals so have to declare here and unset before using.
 declare -a fields
 declare -a labels
+
+# ----------------------------------------
+# recordsprompt(records, title, dislpayfn)
+# ----------------------------------------
+#
+#                        ----- TODO COMPLETE DOCUMENTATION -----
+#
+# VARS:  - $RECORDPROMPT
+#
+#        - $PROMPT
+#
+#        - $TITLE
+#
+#        - $ADDFN addfn(records, keys, promptlabel)
+#
+#        - $DELFN delfn(records, key, promptlabel)
+#
+# USAGE EXAMPLE:
+#
+#  # Shows a list of all selected fruits in a fruit record.
+#  function fruit_display {
+#    local -r records="$1"
+#    local -r key="$2"
+#    local -r fields=( $3 )
+#    local -a fruits
+#    for i in ${!fields[@]}; do
+#      local field="${records}_${key}_${fields[$i]}"
+#      [ "${!field}" = "y" ] && fruits[${#fruits[@]}]="${recordsprompt_labels[$i]}"
+#    done
+#    [ ${#fruits[@]} -gt 0 ] && printf "%s " "${fruits[@]}" || printf "[NO FRUITS]"
+#  }
+#
+#  fruit_0_cherries=y
+#  fruit_0_oranges=y
+#  fruit_1_lemons=n
+#  fruit_1_limes=y
+#  recordsprompt fruit "fruit" fruit_display <<EOF
+#    cboxprompt | cboxdisplay | n | cherries | Cherries
+#    cboxprompt | cboxdisplay | n | oranges  | Oranges
+#    cboxprompt | cboxdisplay | n | pears    | Pears
+#    cboxprompt | cboxdisplay | y | lemons   | Lemons
+#    cboxprompt | cboxdisplay | n | limes    | Limes
+#  EOF
+#
+function recordsprompt {
+
+  # Local vars.
+  local -r recordsfield="$1"
+  local -r recordslabel="$2"
+  local -r recorddisplayfn="$3"
+  local -r addfn=$(get ADDFN recordsprompt_addfn)
+  local -r delfn=$(get DELFN recordsprompt_delfn)
+  local -r recordprompt="$(get RECORDPROMPT 'Choose item to edit or press [ENTER] to confirm')"
+  local -r prompt="$(get PROMPT 'Choose a record to edit or press [ENTER] to confirm')"
+  local -r title="$(get TITLE "Choose ${recordslabel} to edit or press [ENTER] to confirm")"
+
+  # If we haven't read fields off the input stream yet, do so.
+  if [ ${#recordsprompt_fields[@]} = 0 ]; then
+    local -a recordsprompt_promptfns
+    local -a recordsprompt_displayfns
+    local -a recordsprompt_defaults
+    local -a recordsprompt_fields
+    local -a recordsprompt_labels
+    local -a recordsprompt_promptlabels
+    while IFS="|" read promptfn displayfn default field label promptlabel; do
+      recordsprompt_promptfns[${#recordsprompt_promptfns[@]}]=${promptfn}
+      recordsprompt_displayfns[${#recordsprompt_displayfns[@]}]=${displayfn}
+      recordsprompt_defaults[${#recordsprompt_defaults[@]}]="$(sed 's/^[[:space:]]*//g' <<< "${default}" | sed 's/[[:space:]]*$//g')"
+      recordsprompt_fields[${#recordsprompt_fields[@]}]=${field}
+      recordsprompt_labels[${#recordsprompt_labels[@]}]="$(sed 's/^[[:space:]]*//g' <<< "${label}" | sed 's/[[:space:]]*$//g')"
+      recordsprompt_promptlabels[${#recordsprompt_promptlabels[@]}]="$(sed 's/^[[:space:]]*//g' <<< "${promptlabel}" | sed 's/[[:space:]]*$//g')"
+    done
+  fi
+
+  # Loop. If multiprompt returns with 1 we regenerate the menu.
+  while : ; do
+
+    local config=""
+    local keys="$(recordskeys ${recordsfield})"
+
+    # Prompt config: add records listings
+    for k in ${keys}; do
+      config+="recordsprompt_group_prompt|${recorddisplayfn}||${recordsfield}|${k}|${recordsprompt_fields[@]}|"$'\n'
+    done
+
+    # Prompt config: edit individual records
+    for i in ${!recordsprompt_fields[@]}; do
+      for k in ${keys}; do
+        local field=$(ns ${recordsfield} _ ${k} _ ${recordsprompt_fields[$i]})
+        config+="${recordsprompt_promptfns[$i]}|${recordsprompt_displayfns[$i]}|${recordsprompt_defaults[$i]}|${field}|${recordsprompt_labels[$i]}|${recordsprompt_promptlabels[$i]}|$k"$'\n'
+      done
+    done
+
+    # Prompt config: "add new record" controls
+    if [ -n "${addfn}" ]; then
+      config+="recordsprompt_addfn_prompt|recordsprompt_addfn_display||${recordsfield}|${recordsprompt_fields[@]}|${keys}|"$'\n'
+    fi
+
+    # Prompt config: "delete record" controls
+    if [ -n "${delfn}" ]; then
+      for k in ${keys}; do
+        config+="recordsprompt_delfn_prompt|recordsprompt_delfn_display||${recordsfield}|${recordsprompt_fields[@]}|${k}|${k}"$'\n'
+      done
+    fi
+
+    # Prompt.
+    PROMPT="${prompt}" multiprompt "${title}" "1" <<< "${config}"
+    [ $? = 1 ] || return 1
+
+  done
+}
+
+# ----------------------------
+# recordsprompt_group_prompt()
+# ----------------------------
+# TODO: Document this.
+#
+function recordsprompt_group_prompt {
+  GROUP="$3" PROMPT="${recordprompt}" recordsprompt \
+    "${recordsfield}" "${recordslabel}" "${recorddisplayfn}" "${addfn}" "${delfn}"
+}
+
+# -----------------------------
+# recordsprompt_addfn_display()
+# -----------------------------
+# TODO: Document this.
+#
+function recordsprompt_addfn_display {
+  get ADDLABEL "Add new ${recordslabel}"
+}
+
+# -------------------------------------------------
+# recordsprompt_addfn_prompt(records, keys, fields)
+# -------------------------------------------------
+# TODO: Document this.
+#
+function recordsprompt_addfn_prompt {
+  local -r records="$1"
+  recordsnextkey ${records}
+  local -r nextkey=$?
+  ${addfn} "${records}" "${nextkey}" "$3"
+  return 1
+}
+
+# ------------------------------------------
+# recordsprompt_addfn(records, keys, fields)
+# ------------------------------------------
+# TODO: Document this.
+#
+function recordsprompt_addfn {
+  local -r records="$1"
+  local -r nextkey="$2"
+  local -r fields=( $3 )
+  for i in ${!fields[@]}; do
+    field="${records}_${nextkey}_${fields[$i]}"
+    value="${recordsprompt_defaults[$i]}"
+    export ${field}="${value}"
+  done
+}
+
+# -----------------------------
+# recordsprompt_delfn_display()
+# -----------------------------
+# TODO: Document this.
+#
+function recordsprompt_delfn_display {
+  get DELLABEL "Remove ${recordslabel}"
+}
+
+# ------------------------------------------------
+# recordsprompt_delfn_prompt(records, key, fields)
+# ------------------------------------------------
+# TODO: Document this.
+#
+function recordsprompt_delfn_prompt {
+  ${delfn} "$1" "$2" "$3"
+  return 2
+}
+
+# -----------------------------------------
+# recordsprompt_delfn(records, key, fields)
+# -----------------------------------------
+# TODO: Document this.
+#
+function recordsprompt_delfn {
+  local -r records="$1"
+  local -r key="$2"
+  local -r fields=( $3 )
+  local -r display="$(${recorddisplayfn} "${records}" "${key}" "$3")"
+  ynprompt v "Really delete ${recordslabel} \"${display}\"?"
+  if [ "${v}" = "y" ]; then
+    for i in ${!fields[@]}; do
+      field="${records}_${key}_${fields[$i]}"
+      unset ${field}
+    done
+  fi
+}
+
+# --------------------
+# recordskeys(records)
+# --------------------
+# TODO: Document this.
+#
+function recordskeys {
+  # TODO: Find a better way to filter out functions (and other non-record vars).
+  set | grep "^${1}_" | grep -v '()' | sed "s/^${1}_\([^_]*\)_.*/\1/g" | uniq | sort | sed ':a;N;$!ba;s/\n/ /g'
+}
+
+# -----------------------
+# recordsnextkey(records)
+# -----------------------
+# TODO: Document this.
+#
+function recordsnextkey {
+  local n=0
+  for k in $(recordskeys $1); do
+    valid_number 0 99999999 "$k" && n=$(($k>=$n?$k+1:$n))
+  done
+  return $n
+}
 
 # ------------------------------
 # argsprompt(title, num_columns)
@@ -2587,7 +2808,6 @@ unset missing
 # Set up the temporary directory.
 [ ! -d "$TEMPDIR" ] &&
   fatal "Could not create temporary directory, exiting."
-trap 'rm -rf "$TEMPDIR"' EXIT INT TERM HUP
 echo "TESTVALUE" > "$TEMPDIR/writecheck"
 [ -f "$TEMPDIR/writecheck" ] &&
   grep "TESTVALUE" "$TEMPDIR/writecheck" >> /dev/null &&
@@ -2639,3 +2859,15 @@ for command_and_args in "${commands[@]}"; do
     break; # Only invoke 1 version of command func.
   done
 done
+
+function fruit_display {
+  local -r records="$1"
+  local -r key="$2"
+  local -r fields=( $3 )
+  local -a fruits
+  for i in ${!fields[@]}; do
+    local field="${records}_${key}_${fields[$i]}"
+    [ "${!field}" = "y" ] && fruits[${#fruits[@]}]="${recordsprompt_labels[$i]}"
+  done
+  [ ${#fruits[@]} -gt 0 ] && printf "%s " "${fruits[@]}" || printf "[NO FRUITS]"
+}
