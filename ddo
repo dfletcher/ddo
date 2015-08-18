@@ -2859,15 +2859,3 @@ for command_and_args in "${commands[@]}"; do
     break; # Only invoke 1 version of command func.
   done
 done
-
-function fruit_display {
-  local -r records="$1"
-  local -r key="$2"
-  local -r fields=( $3 )
-  local -a fruits
-  for i in ${!fields[@]}; do
-    local field="${records}_${key}_${fields[$i]}"
-    [ "${!field}" = "y" ] && fruits[${#fruits[@]}]="${recordsprompt_labels[$i]}"
-  done
-  [ ${#fruits[@]} -gt 0 ] && printf "%s " "${fruits[@]}" || printf "[NO FRUITS]"
-}
