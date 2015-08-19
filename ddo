@@ -1241,7 +1241,11 @@ function multiprompt {
     local label="${multiprompt_labels[$selected]}"
     local promptfn="${multiprompt_promptfns[$selected]}"
     local promptmsg="${multiprompt_promptmsgs[$selected]}"
-    ${promptfn} "${field}" "${promptmsg}" "${label}" <"${TTY}" >>"${TTY}" || return $?
+    local savedgroup="${GROUP}" # Stash the group, promptfn might change it.
+    ${promptfn} "${field}" "${promptmsg}" "${label}" <"${TTY}" >>"${TTY}"
+    local promptresult=$?
+    GROUP="${savedgroup}"
+    [ ${promptresult} = 0 ] || return ${promptresult}
   done
   fields=${multiprompt_fields[@]}
   labels=${multiprompt_labels[@]}
@@ -1508,7 +1512,7 @@ function recordsnextkey {
 #
 #              [column 3] description
 #              ------------------------
-#              More detailed description dislpayed in help message.
+#              More detailed description displayed in help message.
 #
 # STDOUT:  Interactive.
 #
@@ -2243,6 +2247,15 @@ read -d "" addserver_CONFIG <<EOF
     Alias | Enter a short lowercase alias | \
     --alias | -a | A short aliased name for the host.
 
+  addserver_roles | dtp | \
+    Roles | | \
+    --roles | -r | Role(s) the server will provide. Value can include one or \
+                   more of [ldtp] which stand for (l)ocal (d)evelopment \
+                   (t)testing and (p)roduction. It is not recommended to \
+                   combine [l] with any other roles, doing so will cause a \
+                   warning prompt to be displayed. | \
+    | addserver_roles_prompt | addserver_roles_display
+
   addserver_host | =PROMPT | \
     Host | Enter the server's host name | \
     --host  | -h | Host name.
@@ -2287,12 +2300,103 @@ read -d "" addserver_CONFIG <<EOF
     --httpd-type | -H | Web server type (currently only apache2). | \
     addserver_httpd | addserver_httpdtype_prompt
 
-  addserver_httpdconf | /etc/apache2 | \
-    Web server configuration directoy | Web server configuration directoy | \
-    --httpd-conf | -H | Web server configuration directoy. | \
+  addserver_apache2conf | /etc/apache2 | \
+    Apache 2 configuration directory | Apache 2 configuration directory | \
+    --apache2-conf | -c | Apache 2 configuration directory. | \
     addserver_httpd[addserver_httpdtype=apache2]
 
+  addserver_apache2logs | /var/log/apache2 | \
+    Apache 2 logs directory | Apache 2 logs directory | \
+    --apache2-logs | -l | Apache 2 logs directory. | \
+    addserver_httpd[addserver_httpdtype=apache2]
+
+  addserver_apache2vhosts | | \
+    Apache 2 virtual hosts config | Apache 2 virtual hosts config | \
+    || Apache 2 virtual hosts config. | \
+    addserver_httpd[addserver_httpdtype=apache2] | \
+    addserver_apache2vhosts_prompt
+
 EOF
+
+# TODO: E-mail prompt for ServerAdmin.
+read -d "" addserver_apache2vhosts_RECORD <<EOF
+  cboxprompt | cboxdisplay |  n   | ssl   | Enable SSL
+  textprompt | display     | *:80 | name  | NameVirtualHost | NameVirtualHost name (e.g. *:80)
+  textprompt | display     |      | admin | ServerAdmin     | Server admin e-mail address
+EOF
+
+read -d "" addserver_roles_CHECKBOXES <<EOF
+  n  |  addserver_roles_local       |  Local development
+  y  |  addserver_roles_dev         |  Development server
+  y  |  addserver_roles_testing     |  Testing server
+  y  |  addserver_roles_production  |  Production server
+EOF
+
+function string_contains {
+  grep "$2" <<< "$1" >> /dev/null
+}
+
+function addserver_roles_sanitize {
+  local roles=""
+  string_contains "${addserver_roles}" "l" && roles+=l
+  string_contains "${addserver_roles}" "d" && roles+=d
+  string_contains "${addserver_roles}" "t" && roles+=t
+  string_contains "${addserver_roles}" "p" && roles+=p
+  export addserver_roles="${roles}"
+}
+
+function addserver_roles_prompt {
+  addserver_roles_sanitize
+  local -r field="$1"
+  local roles=""
+  local addserver_roles_local=n
+  local addserver_roles_dev=n
+  local addserver_roles_testing=n
+  local addserver_roles_production=n
+  string_contains "${addserver_roles}" "l" && addserver_roles_local=y
+  string_contains "${addserver_roles}" "d" && addserver_roles_dev=y
+  string_contains "${addserver_roles}" "t" && addserver_roles_testing=y
+  string_contains "${addserver_roles}" "p" && addserver_roles_production=y
+  checkboxprompt "Select server roles" 2 <<< "${addserver_roles_CHECKBOXES}"
+  [ "${addserver_roles_local}" = y ] && roles+="l"
+  [ "${addserver_roles_dev}" = y ] && roles+="d"
+  [ "${addserver_roles_testing}" = y ] && roles+="t"
+  [ "${addserver_roles_production}" = y ] && roles+="p"
+  export addserver_roles="${roles}"
+}
+
+function addserver_roles_display {
+  addserver_roles_sanitize
+  local -r roles=( ${addserver_roles} )
+  local display=""
+  for (( i=0; i<${#roles}; i++ )); do
+    [ ${roles:$i:1} = l ] && display+="local "
+    [ ${roles:$i:1} = d ] && display+="development "
+    [ ${roles:$i:1} = t ] && display+="testing "
+    [ ${roles:$i:1} = p ] && display+="production "
+  done
+  display="$(sed 's/[[:space:]]$//g' <<< "${display}" | sed 's/ /, /g')"
+  printf "Roles: %s" "${display}"
+}
+
+function addserver_apache2vhosts_display {
+  local -r records="$1"
+  local -r key="$2"
+  local -r namefield="${records}_${key}_name"
+  local -r name="${!namefield}"
+  echo "NameVirtualHost ${name}"
+}
+
+function addserver_apache2vhosts_prompt {
+  GROUP="" \
+  apache2vhosts_0_name="*:80" \
+  apache2vhosts_0_ssl="n" \
+  apache2vhosts_1_name="*:443" \
+  apache2vhosts_1_ssl="y" \
+    recordsprompt apache2vhosts "virtual host" \
+    addserver_apache2vhosts_display <<< "${addserver_apache2vhosts_RECORD}"
+  # TODO: there's a bug here, it's jumping up two menu levels after exit.
+}
 
 function addserver_httpdtype_prompt {
   local -r addserver_httpdtype_prompt_field="${1}"
