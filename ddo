@@ -544,6 +544,7 @@ function tableformat {
   header=".ll ${width}m"$'\n'
   header+=".po ${margin}m"$'\n'
   header+=$'.pl 999999\n'
+  header+=$'.char \[hy] -\n'
   header+=$'.TS\n'
   [ -n "$OPTIONS" ] && header+="$OPTIONS"$';\n'
   [ -n "$HEADER_FORMAT" ] && header+="$HEADER_FORMAT"$'\n'
