@@ -2389,10 +2389,6 @@ function addserver_apache2vhosts_display {
 
 function addserver_apache2vhosts_prompt {
   GROUP="" \
-  apache2vhosts_0_name="*:80" \
-  apache2vhosts_0_ssl="n" \
-  apache2vhosts_1_name="*:443" \
-  apache2vhosts_1_ssl="y" \
     recordsprompt apache2vhosts "virtual host" \
     addserver_apache2vhosts_display <<< "${addserver_apache2vhosts_RECORD}"
   # TODO: there's a bug here, it's jumping up two menu levels after exit.
@@ -2451,9 +2447,29 @@ function addserver_preflight {
   return 0
 }
 
+function addserver_command_init {
+  [ -z "${apache2vhosts_0_name}" ] &&
+    export apache2vhosts_0_name="*:80"
+  [ -z "${apache2vhosts_0_ssl}" ] &&
+    export apache2vhosts_0_ssl=n
+  [ -z "${apache2vhosts_0_admin}" ] &&
+  [ -n "${addserver_user}" ] &&
+  [ -n "${addserver_host}" ] &&
+    export apache2vhosts_0_admin="${addserver_user}@${addserver_host}"
+  [ -z "${apache2vhosts_1_name}" ] &&
+    export apache2vhosts_1_name="*:443"
+  [ -z "${apache2vhosts_1_ssl}" ] &&
+    export apache2vhosts_1_ssl=y
+  [ -z "${apache2vhosts_1_admin}" ] &&
+  [ -n "${addserver_user}" ] &&
+  [ -n "${addserver_host}" ] &&
+    export apache2vhosts_1_admin="${addserver_user}@${addserver_host}"
+}
+
 function addserver_command {
 
   # Process arguments.
+  INIT="addserver_command_init" \
   PROMPT="Choose item to edit or press [ENTER] to test access and save" \
     argsprompt "Add a new server" 1 "$@" <<< "${addserver_CONFIG}"
 
@@ -2463,9 +2479,21 @@ function addserver_command {
 
   # Write output file.
   for f in ${fields[@]}; do
-    name=$(sed "s/addserver/${addserver_alias}/g" <<< ${f})
+    local name=$(sed "s/addserver/${addserver_alias}/g" <<< ${f})
     echo "${name}=${!f}" >> "$file"
   done
+
+  # Add apache vhosts to file.
+  if [ "${addserver_httpdtype}" = "apache2" ]; then
+    for key in $(recordskeys apache2vhosts); do
+      local name="apache2vhosts_${key}_name"
+      echo "${addserver_alias}_${name}=${!name}" >> "$file"
+      local ssl="apache2vhosts_${key}_ssl"
+      echo "${addserver_alias}_${ssl}=${!ssl}" >> "$file"
+      local admin="apache2vhosts_${key}_admin"
+      echo "${addserver_alias}_${admin}=${!admin}" >> "$file"
+    done
+  fi
 
   # Read output file and test.
   if ! loadserver "${addserver_alias}"; then
