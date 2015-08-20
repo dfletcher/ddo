@@ -7,7 +7,7 @@
 declare -r SCRIPTHOME="$HOME/.ddo"
 declare -r SCRIPTPATH=$0
 declare -r PROGRAM=$(basename ${0})
-declare -r TTY="$(tty | sed -e "s/.*tty\(.*\)/\1/")"
+declare -r TTY="$(tty)"
 declare -r USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
 declare -r SERVER_COMMANDS="ping init_vhost keyexchange_rsa apache2_init mysql_scan"
 declare -r DEPS="dd od tee cat ssh awk grep sed wget git tbl groff tr"
@@ -66,7 +66,7 @@ function get {
 function index {
   var="$1"
   deref="${!var}"
-  echo "var: ${deref[@]}" >> "${TTY}"
+  echo "var: ${deref[@]}"
   [ -n "${!var[$2]}" ] && printf "${!var[$2]}" || printf "$3"
 }
 
@@ -886,7 +886,7 @@ function prompt {
   result=""
   [ -n "${SILENT}" ] && silent="-s" || silent=""
   [ -n "${DEFAULT}" ] && default="-i${DEFAULT}" || default=""
-  if [[ -n "$*" ]]; then
+  if [ -n "$*" ]; then
     while [[ ! "$@" =~ (^| )"$result"($| ) ]]; do
       read ${silent} ${default} -ep "$message: " result < ${TTY} >> ${TTY}
     done
@@ -1180,8 +1180,7 @@ function multiprompt {
         ${multiprompt_promptfns[$i]} \
           "${multiprompt_fields[$i]}" \
           "${multiprompt_promptmsgs[$i]}" \
-          "${multiprompt_labels[$i]}" \
-          < "${TTY}" >> "${TTY}"
+          "${multiprompt_labels[$i]}"
       else
         # Otherwise just set the default value.
         export ${multiprompt_fields[$i]}="${multiprompt_defaults[$i]}"
@@ -1206,7 +1205,6 @@ function multiprompt {
         [ -z "${predicate}" ] && break
         local testfield="$(sed 's/[[:space:]]*\([^\=[:space:]]*\)\=[^$]*/\1/g' <<< ${predicate})"
         local testvalue="$(sed 's/[^\=]*\=\([^$]*\)/\1/g' <<< ${predicate})"
-        #echo "predicate check: '${!testfield}' ~= '${testvalue}' (in field ${field}, predicate field ${testfield})"
         [ "${!testfield}" != "${testvalue}" ] && continue 2
         j=$((j+1))
       done
@@ -1219,15 +1217,16 @@ function multiprompt {
       selectmap[$n]="$i"
       n=$((n+1))
     done
-    printf $'\n%s:\n\n' "${1}" >> "${TTY}"
-    column -t -s "|" <<< "$table" >> "${TTY}"
-    echo >> "${TTY}"; prompt i "${pmsg}" <"${TTY}" >> "${TTY}"
-    [[ -z "$i" ]] && break # [ENTER] exits the loop
+    printf $'\n%s:\n\n' "${1}"
+    column -t -s "|" <<< "$table"
+    echo
+    prompt i "${pmsg}"
+    [ -z "$i" ] && break # [ENTER] exits the loop
     selected="${selectmap[$i]}"
     if [ -z "${selected}" ]; then
-      echo >> "${TTY}"
+      echo
       echo "Sorry I don't understand \"$i\". Please select one of the" \
-           "displayed items or press [ENTER] to confirm." >> "${TTY}"
+           "displayed items or press [ENTER] to confirm."
       continue
     fi
     local field="${multiprompt_fields[$selected]}"
@@ -1235,7 +1234,7 @@ function multiprompt {
     local promptfn="${multiprompt_promptfns[$selected]}"
     local promptmsg="${multiprompt_promptmsgs[$selected]}"
     local savedgroup="${GROUP}" # Stash the group, promptfn might change it.
-    ${promptfn} "${field}" "${promptmsg}" "${label}" <"${TTY}" >>"${TTY}"
+    ${promptfn} "${field}" "${promptmsg}" "${label}"
     local promptresult=$?
     GROUP="${savedgroup}"
     [ ${promptresult} = 0 ] || return ${promptresult}
@@ -1590,7 +1589,7 @@ function argsprompt {
       argsprompt_descriptions \
       argsprompt_visibility \
       argsprompt_promptfns \
-      argsprompt_displayfns \
+      argsprompt_displayfns
 
     for i in "${!argsprompt_fields[@]}"; do
       [ -n "${argsprompt_promptfns[$i]}" ] &&
@@ -2144,11 +2143,11 @@ function apache2_init_preflight {
   printf $'+INFO  - %s\n' "${sudo_missing[@]}"
   #if [ ${#sudo_missing[@]} > 0 ]; then
   #  # TODO print the sudo_missing list of lines.
-  #  if ynprompt "Add these lines to /etc/sudoers?" < ${TTY} >> ${TTY}; then
+  #  if ynprompt "Add these lines to /etc/sudoers?"; then
   #    # TODO be more careful about existing sudoers.new if exists.
   #    local missing="$(printf $'%s\n' "${sudo_missing[@]}")"
   #    sed "/# User privilege specification/${missing}\n" /etc/sudoers |
-  #      sudo ${TEE} /etc/sudoers.new < ${TTY} >> ${TTY}
+  #      sudo ${TEE} /etc/sudoers.new
   #  fi
   #fi
   return 0
