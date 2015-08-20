@@ -721,23 +721,55 @@ EOF
 # TODO docs!
 # argshelp(command, usage)
 function argshelp {
-  command="$1"
+  local -r configvar="$1"
+  local -r config=
   shift
-  config=$(ns $command _CONFIG)
-  config="${!config}"
-  unset helplines
-  while read_array a; do
-    [ -z "${a[4]}" ] && [ -z "${a[5]}" ] && continue
-    [ -n "${a[4]}" ] && helplines+="${a[4]}"
-    [ -n "${a[4]}" ] && [ -n "${a[5]}" ] && helplines+=","
-    [ -n "${a[5]}" ] && helplines+="${a[5]}"
-    helplines+="|${a[6]}"$'\n'
-  done <<< "$config"
+  local helplines=""
+
+  local -a argshelp_fields
+  local -a argshelp_defaults
+  local -a argshelp_labels
+  local -a argshelp_prompts
+  local -a argshelp_longopts
+  local -a argshelp_shortopts
+  local -a argshelp_descriptions
+  local -a argshelp_visibility
+  local -a argshelp_promptfns
+  local -a argshelp_displayfns
+  local -a argshelp_required
+
+  read_arrays \
+    argshelp_fields \
+    argshelp_defaults \
+    argshelp_labels \
+    argshelp_prompts \
+    argshelp_longopts \
+    argshelp_shortopts \
+    argshelp_descriptions \
+    argshelp_visibility \
+    argshelp_promptfns \
+    argshelp_displayfns \
+    <<< "${!configvar}"
+
+  for i in "${!argshelp_fields[@]}"; do
+    [ -z "${argshelp_longopts[$i]}" ] &&
+    [ -z "${argshelp_shortopts[$i]}" ] &&
+      continue
+    [ -n "${argshelp_longopts[$i]}" ] &&
+      helplines+="${argshelp_longopts[$i]}"
+    [ -n "${argshelp_longopts[$i]}" ] &&
+    [ -n "${argshelp_shortopts[$i]}" ] &&
+      helplines+=","
+    [ -n "${argshelp_shortopts[$i]}" ] &&
+      helplines+="${argshelp_shortopts[$i]}"
+    helplines+="|${argshelp_descriptions[$i]}"$'\n'
+  done
+
   while [ -n "$1" ]; do
-    echo "$1" | sed 's/^/   /'
+    MARGIN="3" paragraph <<< "$1"
     shift
   done
-  echo
+
   FORMAT="lw18 lx" HEADER_FORMAT="lb" tableformat <<EOF
     Arguments
     _
@@ -926,68 +958,16 @@ function pwprompt {
   export $1="${prompt1}"
 }
 
-# -----------------------
-# read_filtered(variable)
-# -----------------------
+# -------------------------------------------------------
+# read_arrays(variable1 [, variable2 [, variable3 ... ]])
+# -------------------------------------------------------
 #
-# Utility: A wrapper around bash's built-in read with a few extra features:
+#  ------------- TODO FIX UP THESE DOCS ----------------
 #
 #  * Removes lines that contain only a comment.
 #  * Removes empty lines.
 #  * Removes comments from the end of lines.
 #  * Trims extra whitespace from the start and end of lines.
-#
-# ARGS:  - variable: Name of variable to set with the read results.
-#
-# STDIN:   Stream of line(s) to read.
-#
-# STDOUT:  Unused
-#
-# VARS:  - ${!variable}: Output variable set to line that was read.
-#
-#        - $PREPROCESS: Input - Name of a function to call to rewrite valid
-#          lines. PREPROCESS(line). If specified, function should `echo` the
-#          altered line.
-#
-#        - $PREFIX: Input - Text to insert before valid input lines. Alternate
-#          way to do similar as PREPROCESS without writing a separate function.
-#
-# RETURN:  Similar to bash build-in read function: zero on success, non-zero
-#          value on error or EOF.
-#
-# USAGE EXAMPLES:
-#
-#   TODO
-#
-function read_filtered {
-  export $1=""
-  while : ; do
-    read -r line
-    rval=$?
-    # Handle EOF.
-    [[ $rval != 0 ]] && break
-    # Remove comment lines.
-    [[ -z "`grep -ve \"^[\s]*#\" <<< \"$line\"`" ]] && continue
-    # Remove empty lines.
-    [[ -z $line ]] && continue
-    # End of line comments.
-    line="`sed "s/\#[^$]*$//g" <<< \"$line\"`"
-    # Trim whitespace at start and end.
-    line="`sed \"s/^\s+//g\" <<< "$line" | sed \"s/\s+$//g\"`"
-    [[ -n "$PREPROCESS" ]] && line=`$PREPROCESS "$line"`
-    [[ -n "$PREFIX" ]] && line="$PREFIX $line"
-    export $1="$line"
-    break
-  done
-  # Return value from read call.
-  return $rval
-}
-
-# --------------------
-# read_array(variable)
-# --------------------
-#
-# Utility: Similar to read_filtered but reads data into an array of values.
 #
 # ARGS:  - variable: Name of variable to set with array results.
 #
@@ -1014,20 +994,23 @@ function read_filtered {
 #
 #   TODO
 #
-function read_array {
-  variable="$1"
-  [[ -n "$SEPARATOR" ]] && sep="$SEPARATOR" || sep="|"
-  # Based on read_filtered.
-  read_filtered line
-  rval=$?
-  # Handle EOF.
-  [[ $rval != 0 ]] && return $rval
-  # Trim whitespace around separator.
-  line="`sed \"s/\s*$sep\s*/$sep/g\" <<< \"$line\"`"
-  # Parse array.
-  IFS="$sep" read -a "$variable" <<< "$line"
-  # Return value from read_filtered call.
-  return $rval
+function read_arrays {
+  local -r sep=$(get SEPARATOR '|')
+  local orig line
+  local source=""
+  mapfile -t orig < <(grep -vE '^[\s]*#|^[\s]*$' | sed "s/#[^$]*$//g; s/^[[:space:]]*//g; s/[[:space:]]*$//g; s/[[:space:]]*${sep}[[:space:]]*/${sep}/g")
+  for line in "${orig[@]}"; do
+    [ -n "$PREPROCESS" ] && line=`$PREPROCESS "${line}"`
+    [ -n "$PREFIX" ] && line="$PREFIX ${line}"
+    [ -n "$PREPROCESS" -o -n "$PREFIX" ] &&
+      line="$(sed "s/#[^$]*$//g; s/^[[:space:]]*//g; s/[[:space:]]*$//g; s/[[:space:]]*${sep}[[:space:]]*/${sep}/g" <<< "${line}")"
+    [ -n "${source}" ] && source+=$'\n'
+    source+="${line}"
+  done
+  for i in $(seq 1 $#); do
+    mapfile -t $1 < <(awk -F "${sep}" "{print \$${i}}" <<< "${source}")
+    shift
+  done
 }
 
 # ---------------------------------------------
@@ -1167,38 +1150,48 @@ function display {
 #
 function multiprompt {
 
-  local -a multiprompt_fields
-  local -a multiprompt_labels
   local -a multiprompt_promptfns
   local -a multiprompt_displayfns
+  local -a multiprompt_defaults
+  local -a multiprompt_fields
+  local -a multiprompt_labels
   local -a multiprompt_promptmsgs
+  local -a multiprompt_visibility
+
   local -a multiprompt_groups
   local -a multiprompt_predicates
   local pmsg="$(get PROMPT 'Choose item or [ENTER] to confirm')"
 
-  local n=1
-  while read_array a; do
-    multiprompt_promptfns[$n]="${a[0]}"
-    multiprompt_displayfns[$n]="${a[1]}"
-    multiprompt_fields[$n]="${a[3]}"
-    multiprompt_labels[$n]="${a[4]}"
-    multiprompt_promptmsgs[$n]="${a[5]}"
-    # Prepare for awk by replacing "]\s*[" with "|" and removing "\s*" before the first "[".
-    multiprompt_groups[$n]="$(sed "s/[[:space:]]*\\([^\\[[:space:]]*\\)[^$]*$/\\1/g" <<< "${a[6]}")"
-    multiprompt_predicates[$n]="$(sed 's/\][[:space:]]*\[/|/g' <<< "${a[6]}" | sed 's/[[:space:]]*\[/\[/g')"
-    if [[ -z "${!a[3]}" ]]; then # Value not already set.
-      if [[ "${a[2]}" = "=PROMPT" ]]; then
+  read_arrays \
+    multiprompt_promptfns \
+    multiprompt_displayfns \
+    multiprompt_defaults \
+    multiprompt_fields \
+    multiprompt_labels \
+    multiprompt_promptmsgs \
+    multiprompt_visibility
+
+  for i in "${!multiprompt_fields[@]}"; do
+    multiprompt_groups[$i]="$(sed "s/[[:space:]]*\\([^\\[[:space:]]*\\)[^$]*$/\\1/g" <<< "${multiprompt_visibility[$i]}")"
+    multiprompt_predicates[$i]="$(sed 's/\][[:space:]]*\[/|/g; s/[[:space:]]*\[/\[/g' <<< "${multiprompt_visibility[$i]}")"
+    if [ -z "${!multiprompt_fields[$i]}" ]; then # Value not already set.
+      if [ "${multiprompt_defaults[$i]}" = "=PROMPT" ]; then
         # Magic value "=PROMPT" so promp user now.
-        ${a[0]} "${a[3]}" "${a[5]}" "${a[4]}" < "${TTY}"
+        ${multiprompt_promptfns[$i]} \
+          "${multiprompt_fields[$i]}" \
+          "${multiprompt_promptmsgs[$i]}" \
+          "${multiprompt_labels[$i]}" \
+          < "${TTY}" >> "${TTY}"
       else
         # Otherwise just set the default value.
-        export ${a[3]}="${a[2]}"
+        export ${multiprompt_fields[$i]}="${multiprompt_defaults[$i]}"
       fi
     fi
-    n=$((n+1))
   done
 
+  # User init.
   [[ -n "${INIT}" ]] && ${INIT}
+
   while : ; do
     local n=1
     valid_number 1 64 ${2} && ncolumns=${2} || ncolumns=3
@@ -1206,7 +1199,6 @@ function multiprompt {
     local -a selectmap
     for i in "${!multiprompt_fields[@]}"; do
       local field="${multiprompt_fields[$i]}"
-      #echo "group check '${multiprompt_groups[$i]}' ~= '${GROUP}' (in field ${field})"
       [ "${multiprompt_groups[$i]}" != "${GROUP}" ] && continue
       local j=2
       while : ; do
@@ -1238,8 +1230,6 @@ function multiprompt {
            "displayed items or press [ENTER] to confirm." >> "${TTY}"
       continue
     fi
-    # Execute prompt function in a subshell so if we recurse back to
-    # multiprompt the locals here are not affected.
     local field="${multiprompt_fields[$selected]}"
     local label="${multiprompt_labels[$selected]}"
     local promptfn="${multiprompt_promptfns[$selected]}"
@@ -1575,115 +1565,128 @@ function argsprompt {
   local pfn
   local dfn
 
-  if [ -z "$GROUP" ]; then
-    # Only declare these at the top group. When recursing, keep the values.
+  if [ -z "$argsprompt_mpconfig" ]; then
+
     local -a argsprompt_fields
     local -a argsprompt_defaults
-    local -a argsprompt_required
     local -a argsprompt_labels
     local -a argsprompt_prompts
     local -a argsprompt_longopts
     local -a argsprompt_shortopts
+    local -a argsprompt_descriptions
     local -a argsprompt_visibility
     local -a argsprompt_promptfns
     local -a argsprompt_displayfns
-  fi
+    local -a argsprompt_required
 
-  # Parse the config.
-  local i=0
-  while read_array a; do
-    local field="${a[0]}"
-    [ -n "${a[8]}" ] && pfn="${a[8]}" || pfn="${promptfn}"
-    [ -n "${a[9]}" ] && dfn="${a[9]}" || dfn="${displayfn}"
-    argsprompt_fields[$i]="${field}"
-    local dflt="${a[1]}"
-    case "${a[1]}" in
-      "=GROUP")
-        dflt=""
-        [ -z "${a[8]}" ] && pfn="argsprompt_group_prompt"
-      ;;
-      "=PROMPT"|"=REQUIRED")
-        argsprompt_required["${#argsprompt_required[@]}"]="${field}"
-      ;;
-      *)
-        [ -z "${!a[0]}" ] && export ${a[0]}="${a[1]}"
-      ;;
-    esac
-    argsprompt_defaults[$i]="${dflt}"
-    argsprompt_labels[$i]="${a[2]}"
-    argsprompt_prompts[$i]="${a[3]}"
-    argsprompt_longopts[$i]="${a[4]}"
-    argsprompt_shortopts[$i]="${a[5]}"
-    argsprompt_visibility[$i]="${a[7]}"
-    argsprompt_promptfns[$i]="$pfn"
-    argsprompt_displayfns[$i]="$dfn"
-    i=$((i+1))
-  done
+    # Parse the config.
+    read_arrays \
+      argsprompt_fields \
+      argsprompt_defaults \
+      argsprompt_labels \
+      argsprompt_prompts \
+      argsprompt_longopts \
+      argsprompt_shortopts \
+      argsprompt_descriptions \
+      argsprompt_visibility \
+      argsprompt_promptfns \
+      argsprompt_displayfns \
 
-  # Parse arguments.
-  while : ; do
-    [[ -z "$1" ]] && break
-    local i=0
-    local handled=0
-    while : ; do
-      case "$1" in
-        "${argsprompt_longopts[$i]}")
-          export ${argsprompt_fields[$i]}=$2
-          shift; shift
-          handled=1
+    for i in "${!argsprompt_fields[@]}"; do
+      [ -n "${argsprompt_promptfns[$i]}" ] &&
+        pfn="${argsprompt_promptfns[$i]}" ||
+        pfn="${promptfn}"
+      [ -n "${argsprompt_displayfns[$i]}" ] &&
+        dfn="${argsprompt_displayfns[$i]}" ||
+        dfn="${displayfn}"
+      local dflt="${argsprompt_defaults[$i]}"
+      case "${dflt}" in
+        "=GROUP")
+          dflt=""
+          [ -z "${a[8]}" ] && pfn="argsprompt_group_prompt"
         ;;
-        "${argsprompt_shortopts[$i]}")
-          export ${argsprompt_fields[$i]}=$2
-          shift; shift
-          handled=2
+        "=PROMPT"|"=REQUIRED")
+          local v="${argsprompt_fields[$i]}"
+          argsprompt_required["${#argsprompt_required[@]}"]="${v}"
         ;;
-        ${argsprompt_longopts[$i]}=*)
-          export ${argsprompt_fields[$i]}="`sed \"s/${argsprompt_longopts[$i]}=//g\" <<< \"$1\"`"
-          shift
-          handled=3
-        ;;
-        ${argsprompt_shortopts[$i]}=*)
-          export ${argsprompt_fields[$i]}="`sed \"s/${argsprompt_shortopts[$i]}=//g\" <<< \"$1\"`"
-          shift
-          handled=4
+        *)
+          [ -z "${!argsprompt_fields[$i]}" ] &&
+            export ${argsprompt_fields[$i]}="${dflt}"
         ;;
       esac
-      i=$((i+1))
-      [ $handled != 0 ] && break
-      [ "$i" -ge "${#argsprompt_fields[@]}" ] && break
+      argsprompt_defaults[$i]="${dflt}"
+      argsprompt_promptfns[$i]="${pfn}"
+      argsprompt_displayfns[$i]="${dfn}"
     done
-    [ $handled = 0 ] && fatal "bad arg: '$1'" # TODO better error handling
-  done
 
-  # Check if we have all argsprompt_required fields.
-  if [ $exitearly != 0 ]; then
-    local hasrequired=1
-    for field in "${argsprompt_required[@]}"; do
-      if [ -n "${!field}" ]; then
-        # Required field has a value, keep checking.
-        continue
-      else
-        # Required field has no value, stop checking.
-        hasrequired=0
-        break
-      fi
+    # Parse arguments.
+    while : ; do
+      [[ -z "$1" ]] && break
+      local i=0
+      local handled=0
+      while : ; do
+        case "$1" in
+          "${argsprompt_longopts[$i]}")
+            export ${argsprompt_fields[$i]}=$2
+            shift; shift
+            handled=1
+          ;;
+          "${argsprompt_shortopts[$i]}")
+            export ${argsprompt_fields[$i]}=$2
+            shift; shift
+            handled=2
+          ;;
+          ${argsprompt_longopts[$i]}=*)
+            local v="$(sed "s/${argsprompt_longopts[$i]}=//g" <<< "$1")"
+            export ${argsprompt_fields[$i]}="${v}"
+            shift
+            handled=3
+          ;;
+          ${argsprompt_shortopts[$i]}=*)
+            local v="$(sed "s/${argsprompt_shortopts[$i]}=//g" <<< "$1")"
+            export ${argsprompt_fields[$i]}="${v}"
+            shift
+            handled=4
+          ;;
+        esac
+        i=$((i+1))
+        [ $handled != 0 ] && break
+        [ "$i" -ge "${#argsprompt_fields[@]}" ] && break
+      done
+      [ $handled = 0 ] && fatal "bad arg: '$1'" # TODO better error handling
     done
-    # Early exit if all argsprompt_required fields supplied and requested.
-    [ $hasrequired = 1 ] && return 0
+
+    # Check if we have all argsprompt_required fields.
+    if [ $exitearly != 0 ]; then
+      local hasrequired=1
+      for field in "${argsprompt_required[@]}"; do
+        if [ -n "${!field}" ]; then
+          # Required field has a value, keep checking.
+          continue
+        else
+          # Required field has no value, stop checking.
+          hasrequired=0
+          break
+        fi
+      done
+      # Early exit if all argsprompt_required fields supplied and requested.
+      [ $hasrequired = 1 ] && return 0
+    fi
+
+    # Build multiprompt config.
+    local argsprompt_mpconfig=""
+    for i in "${!argsprompt_fields[@]}"; do
+      argsprompt_mpconfig+="${argsprompt_promptfns[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_displayfns[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_defaults[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_fields[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_labels[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_prompts[$i]}|"
+      argsprompt_mpconfig+="${argsprompt_visibility[$i]}|"
+      argsprompt_mpconfig+=$'\n'
+    done
+
   fi
-
-  # Build a multiprompt config for the current group.
-  local argsprompt_mpconfig=""
-  for i in "${!argsprompt_fields[@]}"; do
-    argsprompt_mpconfig+="${argsprompt_promptfns[$i]}|"
-    argsprompt_mpconfig+="${argsprompt_displayfns[$i]}|"
-    argsprompt_mpconfig+="${argsprompt_defaults[$i]}|"
-    argsprompt_mpconfig+="${argsprompt_fields[$i]}|"
-    argsprompt_mpconfig+="${argsprompt_labels[$i]}|"
-    argsprompt_mpconfig+="${argsprompt_prompts[$i]}|"
-    argsprompt_mpconfig+="${argsprompt_visibility[$i]}|"
-    argsprompt_mpconfig+=$'\n'
-  done
 
   # Do multiprompt until all required values are supplied.
   while : ; do
@@ -1862,7 +1865,7 @@ function cboxdisplay {
 function checkboxprompt {
   [[ -n "$PROMPT" ]] && promptmsg="$PROMPT" || \
     promptmsg="Toggle items by number or press [ENTER] to confirm"
-  PREPROCESS="cboxpreprocess" PROMPT="$promptmsg" multiprompt "$1" "$2"
+  PREPROCESS="cboxpreprocess" PROMPT="$promptmsg" GROUP="" multiprompt "$1" "$2"
   unset unchecked
   unset checked
   for f in "${multiprompt_fields[@]}"; do
@@ -2072,7 +2075,7 @@ function radioprompt {
   [[ -n "$PROMPT" ]] && msg="$PROMPT" || \
     msg="Toggle items by number or press [ENTER] to confirm"
   export selected_value="$1"
-  PREPROCESS="radpreprocess" INIT="radinit" PROMPT="$msg" \
+  PREPROCESS="radpreprocess" INIT="radinit" PROMPT="$msg" GROUP="" \
     multiprompt "$2" "$ncolumns"
 }
 
@@ -2423,7 +2426,7 @@ function addserver_shorthelp {
 }
 
 function addserver_help {
-  argshelp $1 "$PROGRAM $1 (ARGUMENTS)" <<EOL
+  argshelp addserver_CONFIG "$PROGRAM $1 (ARGUMENTS)" <<EOL
   TODO addserver help
 EOL
 }
@@ -2642,7 +2645,7 @@ function keyexchange_shorthelp {
 }
 
 function keyexchange_help {
-  argshelp $1 "$PROGRAM $1 (ARGUMENTS)" <<EOL
+  argshelp keyexchange_CONFIG "$PROGRAM $1 (ARGUMENTS)" <<EOL
   TODO keyexchange help
 EOL
 }
