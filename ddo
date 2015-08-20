@@ -999,6 +999,7 @@ function read_arrays {
   local orig line
   local source=""
   mapfile -t orig < <(grep -vE '^[\s]*#|^[\s]*$' | sed "s/#[^$]*$//g; s/^[[:space:]]*//g; s/[[:space:]]*$//g; s/[[:space:]]*${sep}[[:space:]]*/${sep}/g")
+  [ ${#orig[@]} = 0 ] && return
   for line in "${orig[@]}"; do
     [ -n "$PREPROCESS" ] && line=`$PREPROCESS "${line}"`
     [ -n "$PREFIX" ] && line="$PREFIX ${line}"
@@ -1007,6 +1008,7 @@ function read_arrays {
     [ -n "${source}" ] && source+=$'\n'
     source+="${line}"
   done
+  [ -z "${source}" ] && return
   for i in $(seq 1 $#); do
     mapfile -t $1 < <(awk -F "${sep}" "{print \$${i}}" <<< "${source}")
     shift
@@ -1150,17 +1152,16 @@ function display {
 #
 function multiprompt {
 
-  local -a multiprompt_promptfns
-  local -a multiprompt_displayfns
-  local -a multiprompt_defaults
-  local -a multiprompt_fields
-  local -a multiprompt_labels
-  local -a multiprompt_promptmsgs
-  local -a multiprompt_visibility
-
+  local pmsg="$(get PROMPT 'Choose item or [ENTER] to confirm')"
+  local multiprompt_promptfns=( "${multiprompt_promptfns[@]}" )
+  local multiprompt_displayfns=( "${multiprompt_displayfns[@]}" )
+  local multiprompt_defaults=( "${multiprompt_defaults[@]}" )
+  local multiprompt_fields=( "${multiprompt_fields[@]}" )
+  local multiprompt_labels=( "${multiprompt_labels[@]}" )
+  local multiprompt_promptmsgs=( "${multiprompt_promptmsgs[@]}" )
+  local multiprompt_visibility=( "${multiprompt_visibility[@]}" )
   local -a multiprompt_groups
   local -a multiprompt_predicates
-  local pmsg="$(get PROMPT 'Choose item or [ENTER] to confirm')"
 
   read_arrays \
     multiprompt_promptfns \
@@ -1564,58 +1565,58 @@ function argsprompt {
   local pfn
   local dfn
 
-  if [ -z "$argsprompt_mpconfig" ]; then
+  if [ -z "$multiprompt_promptfns" ]; then
 
-    local -a argsprompt_fields
-    local -a argsprompt_defaults
-    local -a argsprompt_labels
-    local -a argsprompt_prompts
+    local -a multiprompt_fields
+    local -a multiprompt_defaults
+    local -a multiprompt_labels
+    local -a multiprompt_promptmsgs
     local -a argsprompt_longopts
     local -a argsprompt_shortopts
     local -a argsprompt_descriptions
-    local -a argsprompt_visibility
-    local -a argsprompt_promptfns
-    local -a argsprompt_displayfns
+    local -a multiprompt_visibility
+    local -a multiprompt_promptfns
+    local -a multiprompt_displayfns
     local -a argsprompt_required
 
     # Parse the config.
     read_arrays \
-      argsprompt_fields \
-      argsprompt_defaults \
-      argsprompt_labels \
-      argsprompt_prompts \
+      multiprompt_fields \
+      multiprompt_defaults \
+      multiprompt_labels \
+      multiprompt_promptmsgs \
       argsprompt_longopts \
       argsprompt_shortopts \
       argsprompt_descriptions \
-      argsprompt_visibility \
-      argsprompt_promptfns \
-      argsprompt_displayfns
+      multiprompt_visibility \
+      multiprompt_promptfns \
+      multiprompt_displayfns
 
-    for i in "${!argsprompt_fields[@]}"; do
-      [ -n "${argsprompt_promptfns[$i]}" ] &&
-        pfn="${argsprompt_promptfns[$i]}" ||
+    for i in "${!multiprompt_fields[@]}"; do
+      [ -n "${multiprompt_promptfns[$i]}" ] &&
+        pfn="${multiprompt_promptfns[$i]}" ||
         pfn="${promptfn}"
-      [ -n "${argsprompt_displayfns[$i]}" ] &&
-        dfn="${argsprompt_displayfns[$i]}" ||
+      [ -n "${multiprompt_displayfns[$i]}" ] &&
+        dfn="${multiprompt_displayfns[$i]}" ||
         dfn="${displayfn}"
-      local dflt="${argsprompt_defaults[$i]}"
+      local dflt="${multiprompt_defaults[$i]}"
       case "${dflt}" in
         "=GROUP")
           dflt=""
           [ -z "${a[8]}" ] && pfn="argsprompt_group_prompt"
         ;;
         "=PROMPT"|"=REQUIRED")
-          local v="${argsprompt_fields[$i]}"
+          local v="${multiprompt_fields[$i]}"
           argsprompt_required["${#argsprompt_required[@]}"]="${v}"
         ;;
         *)
-          [ -z "${!argsprompt_fields[$i]}" ] &&
-            export ${argsprompt_fields[$i]}="${dflt}"
+          [ -z "${!multiprompt_fields[$i]}" ] &&
+            export ${multiprompt_fields[$i]}="${dflt}"
         ;;
       esac
-      argsprompt_defaults[$i]="${dflt}"
-      argsprompt_promptfns[$i]="${pfn}"
-      argsprompt_displayfns[$i]="${dfn}"
+      multiprompt_defaults[$i]="${dflt}"
+      multiprompt_promptfns[$i]="${pfn}"
+      multiprompt_displayfns[$i]="${dfn}"
     done
 
     # Parse arguments.
@@ -1626,31 +1627,31 @@ function argsprompt {
       while : ; do
         case "$1" in
           "${argsprompt_longopts[$i]}")
-            export ${argsprompt_fields[$i]}=$2
+            export ${multiprompt_fields[$i]}=$2
             shift; shift
             handled=1
           ;;
           "${argsprompt_shortopts[$i]}")
-            export ${argsprompt_fields[$i]}=$2
+            export ${multiprompt_fields[$i]}=$2
             shift; shift
             handled=2
           ;;
           ${argsprompt_longopts[$i]}=*)
             local v="$(sed "s/${argsprompt_longopts[$i]}=//g" <<< "$1")"
-            export ${argsprompt_fields[$i]}="${v}"
+            export ${multiprompt_fields[$i]}="${v}"
             shift
             handled=3
           ;;
           ${argsprompt_shortopts[$i]}=*)
             local v="$(sed "s/${argsprompt_shortopts[$i]}=//g" <<< "$1")"
-            export ${argsprompt_fields[$i]}="${v}"
+            export ${multiprompt_fields[$i]}="${v}"
             shift
             handled=4
           ;;
         esac
         i=$((i+1))
         [ $handled != 0 ] && break
-        [ "$i" -ge "${#argsprompt_fields[@]}" ] && break
+        [ "$i" -ge "${#multiprompt_fields[@]}" ] && break
       done
       [ $handled = 0 ] && fatal "bad arg: '$1'" # TODO better error handling
     done
@@ -1671,38 +1672,20 @@ function argsprompt {
       # Early exit if all argsprompt_required fields supplied and requested.
       [ $hasrequired = 1 ] && return 0
     fi
-
-    # Build multiprompt config.
-    local argsprompt_mpconfig=""
-    for i in "${!argsprompt_fields[@]}"; do
-      argsprompt_mpconfig+="${argsprompt_promptfns[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_displayfns[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_defaults[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_fields[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_labels[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_prompts[$i]}|"
-      argsprompt_mpconfig+="${argsprompt_visibility[$i]}|"
-      argsprompt_mpconfig+=$'\n'
-    done
-
   fi
 
   # Do multiprompt until all required values are supplied.
   while : ; do
-    PREFIX="" PREPROCESS="" \
-      multiprompt "${title}" "${num_columns}" <<< "$argsprompt_mpconfig"
+    PREFIX="" PREPROCESS="" multiprompt "${title}" "${num_columns}" <<< ""
     for field in "${argsprompt_required[@]}"; do
       [ -z "${!field}" ] && continue 2
     done
     break
   done
-
-  fields=${argsprompt_fields[@]}
-  labels=${argsprompt_labels[@]}
 }
 
 function argsprompt_group_prompt {
-  GROUP="$1" PROMPT="$2" argsprompt "$3" 1 <<< ""
+  GROUP="$1" PROMPT="$2" multiprompt "$3" 1 <<< ""
 }
 
 #------------------------------------------------------------------------------
