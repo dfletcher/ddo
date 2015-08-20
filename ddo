@@ -632,7 +632,7 @@ function usage {
     $helpdata
     help [COMMAND] | Display help for a specific command.
 EOF
-  [[ -n "$1" ]] && echo "ERROR: $1."
+  [ -n "$1" ] && echo "ERROR: $1."
 }
 
 # --------------------
@@ -826,12 +826,12 @@ function valid_command {
 # RETURN:  0 if the number is valid, 1 otherwise (bash `if` compatible).
 #
 function valid_number {
-  [[ -n "$3" ]] && \
-    [[ "$3" =~ ^[0-9]+$ ]] && \
-    [[ $3 -ge $1 ]] && \
-    [[ $3 -lt $2 ]] && \
-    return 0
-  return 1
+  [ -n "$3" ] &&
+  [[ "$3" =~ ^[0-9]+$ ]] &&
+  [ $3 -ge $1 ] &&
+  [ $3 -lt $2 ] &&
+    return 0 ||
+    return 1
 }
 
 #------------------------------------------------------------------------------
@@ -875,7 +875,7 @@ function valid_number {
 #   echo "Well hello, ${name}."
 #
 #   prompt ynresult "Do you like fruit? (y/n)" "y" "n"
-#   [[ $ynresult = y ]] && echo "Great, fruit is good for you." \
+#   [ $ynresult = y ] && echo "Great, fruit is good for you." \
 #      || echo "You really should get out more often."
 #
 function prompt {
@@ -924,7 +924,7 @@ function prompt {
 # USAGE EXAMPLES:
 #
 #   ynprompt ynresult "Do you like fruit?"
-#   [[ $ynresult = y ]] && echo "Great, fruit is good for you." \
+#   [ $ynresult = y ] && echo "Great, fruit is good for you." \
 #      || echo "You really should get out more often."
 #
 function ynprompt {
@@ -1222,7 +1222,7 @@ function multiprompt {
   done
 
   # User init.
-  [[ -n "${INIT}" ]] && ${INIT}
+  [ -n "${INIT}" ] && ${INIT}
 
   while : ; do
     local n=1
@@ -1655,7 +1655,7 @@ function argsprompt {
 
     # Parse arguments.
     while : ; do
-      [[ -z "$1" ]] && break
+      [ -z "$1" ] && break
       local i=0
       local handled=0
       while : ; do
@@ -1768,7 +1768,7 @@ function cboxpreprocess {
 #
 function cboxprompt {
   # Don't bother with input, just toggle the state.
-  [[ "${!1}" = "y" ]] && export $1=n || export $1=y
+  [ "${!1}" = "y" ] && export $1=n || export $1=y
 }
 
 # ---------------------------------------------
@@ -1794,7 +1794,7 @@ function cboxprompt {
 # RETURN:  Unused
 #
 function cboxdisplay {
-  [[ "${!1}" = "y" ]] && echo "[X] $2" || echo "[ ] $2"
+  [ "${!1}" = "y" ] && echo "[X] $2" || echo "[ ] $2"
 }
 
 # ----------------------------------
@@ -1866,8 +1866,8 @@ function cboxdisplay {
 #       n       |  mango        |  Mango
 #       n       |  pomegranite  |  Pomegranite
 #   EOF
-#   [[ -z "$checked" ]] && checked="nothing!"
-#   [[ -z "$unchecked" ]] && unchecked="nothing!"
+#   [ -z "$checked" ] && checked="nothing!"
+#   [ -z "$unchecked" ] && unchecked="nothing!"
 #   echo "$name likes: $checked"
 #   echo "$name hates: $unchecked"
 #   echo "$name likes cherries? $cherries"
@@ -1875,13 +1875,13 @@ function cboxdisplay {
 # See STDIN above for column definitions.
 #
 function checkboxprompt {
-  [[ -n "$PROMPT" ]] && promptmsg="$PROMPT" || \
+  [ -n "$PROMPT" ] && promptmsg="$PROMPT" || \
     promptmsg="Toggle items by number or press [ENTER] to confirm"
   PREPROCESS="cboxpreprocess" PROMPT="$promptmsg" GROUP="" multiprompt "$1" "$2"
   unset unchecked
   unset checked
   for f in "${multiprompt_fields[@]}"; do
-    [[ "${!f}" = "y" ]] && checked+="$f " || unchecked+="$f "
+    [ "${!f}" = "y" ] && checked+="$f " || unchecked+="$f "
   done
   export checked
   export unchecked
@@ -1942,7 +1942,7 @@ function radinit {
     [ "${selected_value}" = "${field}" ] && break
     n=$((n+1))
   done
-  if [[ ${#multiprompt_fields[@]} = $(($n-1)) ]]; then
+  if [ ${#multiprompt_fields[@]} = $(($n-1)) ]; then
     # There was no valid $selected_value so pick "1" and configure for it.
     n=1
     export selected_value="${multiprompt_fields[$n]}"
@@ -2007,7 +2007,7 @@ function radprompt {
 # RETURN:  Unused
 #
 function raddisplay {
-  [[ "${selected_index}" = "${n}" ]] && echo "(*) $2" || echo "( ) $2"
+  [ "${selected_index}" = "${n}" ] && echo "(*) $2" || echo "( ) $2"
 }
 
 # ----------------------------------------
@@ -2083,8 +2083,8 @@ function raddisplay {
 # See STDIN above for column definitions.
 #
 function radioprompt {
-  [[ -z "$3" ]] && ncolumns=3 || ncolumns="$3"
-  [[ -n "$PROMPT" ]] && msg="$PROMPT" || \
+  [ -z "$3" ] && ncolumns=3 || ncolumns="$3"
+  [ -n "$PROMPT" ] && msg="$PROMPT" || \
     msg="Toggle items by number or press [ENTER] to confirm"
   export selected_value="$1"
   PREPROCESS="radpreprocess" INIT="radinit" PROMPT="$msg" GROUP="" \
@@ -2926,7 +2926,7 @@ for command_and_args in "${commands[@]}"; do
   acommand=($command_and_args)
   command="${acommand[0]}"
   if ! valid_command $command; then
-    [[ -n "${invalid_commands[*]}" ]] && invalid_commands+=" "
+    [ -n "${invalid_commands[*]}" ] && invalid_commands+=" "
     invalid_commands+=$command
   fi
 done
@@ -3032,12 +3032,12 @@ for command_and_args in "${commands[@]}"; do
     ${preflightfn} ${args}
     result=$?
     flightcheck=$(( $flightcheck | $result ))
-    [[ $result ]] && [[ -n "$PREFLGHT_ERROR" ]] && PREFLIGHT_ERRORS[${#PREFLIGHT_ERRORS[@]}]="$PREFLGHT_ERROR"
-    [[ $result ]] && [[ -n "$PREFLIGHT_WARNING" ]] && PREFLIGHT_WARNINGS[${#PREFLIGHT_WARNINGS[@]}]="$PREFLIGHT_WARNING"
+    [ $result ] && [ -n "$PREFLGHT_ERROR" ] && PREFLIGHT_ERRORS[${#PREFLIGHT_ERRORS[@]}]="$PREFLGHT_ERROR"
+    [ $result ] && [ -n "$PREFLIGHT_WARNING" ] && PREFLIGHT_WARNINGS[${#PREFLIGHT_WARNINGS[@]}]="$PREFLIGHT_WARNING"
     break; # Only invoke 1 version of preflight func.
   done
 done
-if [[ $flightcheck != 0 ]]; then
+if [ $flightcheck != 0 ]; then
   echo "${PREFLIGHT_ERRORS[*]}"
   fatal "Did not pass preflight checks: ${PREFLIGHT_ERRORS[*]}" # TODO list ERRORs
 fi
