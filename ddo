@@ -2093,7 +2093,7 @@ function init_init {
   mkdir -p "$SCRIPTHOME/settings/modules"
   mkdir -p "$SCRIPTHOME/settings/themes"
   mkdir -p "$SCRIPTHOME/cache"
-  [ -f "$SCRIPTHOME/cache/project.xml" ] || command_update
+  [ -f "$SCRIPTHOME/cache/project.xml" ] || update_command
   return 0
 }
 
