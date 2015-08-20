@@ -236,14 +236,14 @@ function sshcmd {
   [ -f "$identity" ] && options+=" -i ${identity}"
   [ -n "$user" ] && options+=" -l ${user}"
   options+=" ${host}"
-  local script="REMOTE_ARGUMENTS=( $(printf " %q" "$@") )"$'\n'
+  local script="arguments=( $(printf " %q" "$@") )"$'\n'
   script+="$(cat "$SCRIPTPATH")"$'\n'
   # So far this rather clumsy method of passing the entire script as the
   # command string is the only way to achieve copying this file to the server
   # and running it in a single shot. Attempts to do it using stdin break
   # SSH's pty and then prompting functions and sudo fail to work on remote.
   # Still looking for a nicer way to achieve it.
-  ${SSH} -Ctt ${options} "${script}"
+  ${SSH} -Ctt ${options} "${script}" 2>&1 | grep -v "^Connection to .* closed\..*$"
 }
 
 # -------------------
@@ -2512,6 +2512,7 @@ function addserver_command {
 
   # Offer key exchange if the server is requiring a password.
   unset exchange_args
+  local exchange_results="[NOT NEEDED]"
   if ssh_pw_required "${host}" "${user}" "${identity}" "${opts}"; then
     echo
     paragraph <<EOF
@@ -2521,23 +2522,18 @@ function addserver_command {
       server after which the password will not be required. Note that you can \
       skip this now and run \`${PROGRAM} keyexchange\` later to exchange keys.
 EOF
+    # Do key exchange if requested.
     if ynprompt v "Exchange public key with host ${host}?"; then
-      [ -f ~/.ssh/id_rsa.pub ] && exchange_args="-t rsa -s ${addserver_alias}"
+      echo; echo "Exchanging keys..."
       # TODO handle other key types.
+      # TODO get better control of ssh-keygen here.
+      [ -f ~/.ssh/id_rsa.pub ] || ssh-keygen -t rsa -b 4096
+      if exchange_results="$(keyexchange ~/.ssh/id_rsa.pub rsa "${addserver_alias}")"; then
+        echo "Key exchange succeeded: ${exchange_results}"
+      else
+        echo "Key exchange failed, sorry. Server said: ${exchange_results}."
+      fi
     fi
-  fi
-
-  # Do key exchange if requested.
-  if [ -n "$exchange_args" ]; then
-    echo "Exchanging keys..."
-    if exchange_results=$(keyexchange ${exchange_args}); then
-      echo "${exchange_results}"
-    else
-      echo "Key exchange failed, sorry. Server said: ${exchange_results}."
-      exchange_results="Failed: ${exchange_results}"
-    fi
-  else
-    exchange_results="[NOT NEEDED]"
   fi
 
   # Test remote.
@@ -2594,28 +2590,31 @@ EOF
 function keyexchange_rsa_command {
 
   # Parse the key.
-  key="$1"
+  local key="$1"
   [ -z "$key" ] && fatal "No key given."
+
+  local type rsa id
   IFS=" " read type rsa id <<< "${key}"
-  [ -z "$type" ] || [ -z "$rsa" ] || [ -z "$id" ] && fatal "Bad key format."
+  [ -z "$type" ] || [ -z "${rsa}" ] || [ -z "${id}" ] && fatal "Bad key format."
 
   # Append or write new key file.
-  file="$(echo ~/.ssh/authorized_keys)"
-  if [ -f "$file" ]; then
-    if grep "$rsa" "$file" >> /dev/null; then
+  local keyfile=~/.ssh/authorized_keys
+  if [ -f "${keyfile}" ]; then
+    if grep "${rsa}" "${keyfile}" >> /dev/null; then
       # Key already in authorized_keys.
-      echo "Key is already in file ${file}, skipping."
+      echo "Key is already in file ${keyfile}, skipping."
     else
       # Append the file.
-      echo "${key}" >> "$file"
-      [ grep "$rsa" "$file" >> /dev/null ] ||
-        fatal "Could not append key to file ${file}."
+      echo "${key}" >> "${keyfile}"
+      grep "${rsa}" "${keyfile}" >> /dev/null ||
+        fatal "Could not append key to file ${keyfile}."
+      echo "Added key to ${keyfile}."
     fi
   else
     # No existing file just write a new one.
-    echo "${key}" > "$file"
-    [ -f "$file" ] || fatal "Could not create file ${file}."
-    echo "Created $file."
+    echo "${key}" > "${keyfile}"
+    [ -f "${keyfile}" ] || fatal "Could not create file ${keyfile}."
+    echo "Created ${keyfile}."
   fi
 }
 
@@ -2652,40 +2651,40 @@ EOL
 # Workhorse function for keyexchange command, also utility used by addserver.
 function keyexchange {
 
-  # Process arguments.
-  PROMPT="Choose item to edit or press [ENTER] to exchange keys" \
-    argsprompt "Key exchange" 1 "$@" <<< "${keyexchange_CONFIG}"
+  local keyfile="$1"
+  local keytype="$2"
+  local server="$3"
 
   # Read key file.
-  if [ ! -f "$keyexchange_keyfile" ]; then
-    echo "Could not open key file ${keyexchange_keyfile}."
+  if [ ! -f "$keyfile" ]; then
+    echo "Could not open key file ${keyfile}."
     return 1
   fi
-  read key < "$keyexchange_keyfile"
+  read key < "$keyfile"
   if [ -z "$key" ]; then
-    echo "Could not read key from file ${keyexchange_keyfile}."
+    echo "Could not read key from file ${keyfile}."
     return 2
   fi
 
   # Figure out which remote key exchange command to use.
-  remotecmd="keyexchange_${keyexchange_type}"
-  if ! func $(ns command_ ${remotecmd}); then
-    echo "Sorry I don't understand key type '${keyexchange_type}'."
+  remotecmd="keyexchange_${keytype}"
+  if ! func $(ns ${remotecmd} _command); then
+    echo "Sorry I don't understand key type '${keytype}'."
     return 3
   fi
 
   # Load server data.
-  if ! loadserver "${keyexchange_server}"; then
-    echo "Cannot load server \"${keyexchange_server}\"."
+  if ! loadserver "${server}"; then
+    echo "Cannot load server \"${server}\"."
     return 4
   fi
-  user=$(get $(ns ${keyexchange_server} _user))
-  host=$(get $(ns ${keyexchange_server} _host))
-  identity=$(get $(ns ${keyexchange_server} _identity))
-  opts=$(get $(ns ${keyexchange_server} _sshopts))
+  user=$(get $(ns ${server} _user))
+  host=$(get $(ns ${server} _host))
+  identity=$(get $(ns ${server} _identity))
+  opts=$(get $(ns ${server} _sshopts))
 
   # Execute remote key exchange command.
-  result=$(remote "${keyexchange_server}" "${remotecmd}" "${key}")
+  local result="$(remote "${server}" "${remotecmd}" "${key}")"
   if [ $? = 0 ]; then
     if ssh_pw_required "${host}" "${user}" "${identity}" "${opts}"; then
       [ -n "$result" ] &&
@@ -2703,9 +2702,13 @@ function keyexchange {
 }
 
 function keyexchange_command {
-  result=$(keyexchange $@) &&
-    echo "Key exchange success: $result" ||
-    fatal "Key exchange failed: $result"
+
+  # Process arguments.
+  PROMPT="Choose item to edit or press [ENTER] to exchange keys" \
+    argsprompt "Key exchange" 1 "$@" <<< "${keyexchange_CONFIG}"
+
+  # Exchange keys.
+  keyexchange "${keyexchange_keyfile}" "${keyexchange_type}" "${keyexchange_server}"
 }
 
 #------------------------------------------------------------------------------
@@ -2846,10 +2849,7 @@ PM_INSTALL=$(ns package_ $OS)
 kill -s WINCH $$
 
 # Parse arguments.
-declare arguments=$(get REMOTE_ARGUMENTS)
-[ -n "${REMOTE_ARGUMENTS}" ] &&
-  arguments=( "${REMOTE_ARGUMENTS[@]}" ) ||
-  arguments=( "$@" )
+[ -z "${arguments}" ] && arguments=( "$@" )
 
 declare i=0
 declare command
@@ -2968,7 +2968,9 @@ echo "TESTVALUE" > "$TEMPDIR/writecheck"
 
 # Preflght checks.
 for command_and_args in "${commands[@]}"; do
-  read command args <<< "$command_and_args"
+  eval "aargs=( ${command_and_args} )"
+  command="${aargs[0]}"
+  args=( "${aargs[@]:1}" )
   preflightfns=( $(ns $command _preflight _ $OS) $(ns $command _preflight) )
   for preflightfn in ${preflightfns[@]}; do
     func ${preflightfn} || continue
@@ -2988,11 +2990,13 @@ fi
 
 # Main.
 for command_and_args in "${commands[@]}"; do
-  read command args <<< "$command_and_args"
+  eval "aargs=( ${command_and_args} )"
+  command="${aargs[0]}"
+  args=( "${aargs[@]:1}" )
   commandfns=( $(ns $command _command _ $OS) $(ns $command _command) )
   for commandfn in ${commandfns[@]}; do
     func ${commandfn} || continue
-    ${commandfn} ${args}
+    ${commandfn} "${args[@]}"
     break; # Only invoke 1 version of command func.
   done
 done
