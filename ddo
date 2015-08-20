@@ -1046,10 +1046,8 @@ function display {
 # -------------------------------
 #
 # Display a menu of choices to user, enabling them to change value by number.
-# How list items are displayed and how the data is collected from the user are
-# controlled by the field data descibed below in STDIN.
-#
-#                        ----- TODO NEEDS REVIEW AND UPDATE -----
+# Individual list item display and prompting are controlled by the
+# configuration data descibed below in STDIN.
 #
 # ARGS:  - title: Text to show above the option listing.
 #
@@ -1064,25 +1062,34 @@ function display {
 #              [column 1] promptfn
 #              -------------------
 #              SIG:  promptfn(fieldname, prompt_message, label)
-#              VARS: fields (array), labels (array), promptfns (array),
-#                    displayfns (array), promptmessages (array),
-#                    i (selected index).
+#              VARS: i (selected index).
 #              Prompt function called to change an item value. This function
 #              should ask for user input if needed and export the field value.
+#              Alternately prompt functions may take some automatic action such
+#              as toggling a checkbox and return immediately without direct
+#              user input. Note that it is safe to recursively call other
+#              prompt functions that are based on multiprompt.
 #
 #              [column 2] displayfn
 #              --------------------
 #              SIG:  displayfn(fieldname, label, prompt_message)
-#              VARS: fields (array), labels (array), promptfns (array),
-#                    displayfns (array), promptmessages (array),
-#                    i (selected index).
-#              Display function should `echo` the item for display in list
-#              mode. Keep the text short to work with the given # columns.
+#              VARS: i (selected index).
+#              Display function should print the item to stdout. The result is
+#              used for display in menu listings. Keep the text short so the
+#              display will work nicely with the given num_columns.
 #
 #              [column 3] default
 #              ------------------
 #              Default value for the field. It will only be applied if the
 #              variable of the field doesn't already contain a value.
+#
+#              A default value of "=PROMPT" means prompt the user immediately
+#              for a value before entering menu mode.
+#
+#              A default value of "=GROUP" sets the prompt function to a
+#              recursive sub-group multiprompt. If a user prompt function for
+#              a =GROUP item, it should work similarly to
+#              multiprompt_group_prompt or call that function directly.
 #
 #              [column 4] fieldname
 #              --------------------
@@ -1091,17 +1098,35 @@ function display {
 #
 #              [column 5] label
 #              ----------------
-#              Short label for the field. Normally used in list mode, `echo`d
-#              by the displayfn.
+#              Short label for the field. Passed to the display and prompt
+#              functions.
 #
 #              [column 6] promptmessage
 #              ------------------------
-#              Message to display when prompting for a value. Normally used
-#              in prompt mode, `echo`'d by the promptfn.
+#              Message to display when prompting for a value. Passed to the
+#              display and prompt functions.
 #
 #              [column 7] visibility
 #              ---------------------
-#              TODO
+#              Optional menu visibility control. The format of this column is:
+#
+#                group[predicate][predicate]...
+#
+#              "group" may be empty. An empty group traditionally represents
+#              the top level menu. If group is supplied then this item will
+#              only be displayed when browsing the sub-menu with that group
+#              name.
+#
+#              Each optional "predicate" is of the form [name=value]. A
+#              predicate resolves true if bash variable with "name" is equal
+#              to the given value. The item will only be displayed if all
+#              predicates resolve true.
+#
+#              Example: addserver_httpd[addserver_httpdtype=apache2]
+#
+#              In this example the item will be displayed when (1) the user
+#              is viewing sub-menu group "addserver_httpd" and (2) the bash
+#              variable ${addserver_httptype} is equal to "apache2".
 #
 # STDOUT:  Interactive.
 #
@@ -1116,12 +1141,13 @@ function display {
 #          access to the following vars: fields (array), labels (array),
 #          promptfns (array), displayfns (array), promptmessages (array).
 #
-#        - $PREPROCESS: Input - Name of a function to call to rewrite valid
-#          lines. PREPROCESS(line). If specified, function should `echo` the
-#          altered line.
+#        - $PREPROCESS: Input - Name of a function to call to rewrite
+#          configuration lines. PREPROCESS(line). If specified, function
+#          should print the altered line to stdout.
 #
-#        - $PREFIX: Input - Text to insert before valid input lines. Alternate
-#          way to do similar as PREPROCESS without writing a separate function.
+#        - $PREFIX: Input - Text to insert before each configuration input
+#          line. Alternate way to do similar as PREPROCESS without writing a
+#          separate function.
 #
 #        - $PROMPT: Input - Message displayed during item selection. Default
 #          is "Choose item or press [ENTER] to confirm"
@@ -1129,26 +1155,24 @@ function display {
 #        - $SEPARATOR: Input - Column separator that delineates array items.
 #          Default if not specified is "|".
 #
+#        - The following array variables may be set, and an empty string piped
+#          to the function, which enables a wrapping implementation to do the
+#          configuration parsing more efficiently than rewriting to a string.
+#          See argsprompt for an example of this usage.
+#
+#              * ${multiprompt_promptfns[@]}
+#              * ${multiprompt_displayfns[@]}
+#              * ${multiprompt_defaults[@]}
+#              * ${multiprompt_fields[@]}
+#              * ${multiprompt_labels[@]}
+#              * ${multiprompt_promptmsgs[@]}
+#              * ${multiprompt_visibility[@]}
+#
 # RETURN:  Unused
 #
 # USAGE EXAMPLE:
 #
-#  multiprompt "Fruity multiprompt" 4 <<EOF
-#    # promptfn | displayfn   | dflt | fieldname | label    | promptmessage
-#    # ---------+-------------+------+-----------+----------+-----------------
-#      ynprompt | cboxdisplay | n    | cherries  | Cherries | Include cherries
-#      ynprompt | cboxdisplay | n    | oranges   | Oranges  | Include oranges
-#      ynprompt | cboxdisplay | n    | pears     | Pears    | Include pears
-#      ynprompt | cboxdisplay | y    | lemons    | Lemons   | Include lemons
-#      ynprompt | cboxdisplay | n    | limes     | Limes    | Include limes
-#  EOF
-#  for f in ${fields[@]}; do echo "$f: ${!f}"; done
-#
-# Note that this is a contrived example showing the features of multiprompt().
-# See checkboxprompt or radioprompt for a better way to handle single on/off
-# values and for examples how to extend this function with a simpler interface.
-#
-# See STDIN above for column definitions.
+#   See addserver_CONFIG for a complete example utilizing most features.
 #
 function multiprompt {
 
@@ -1162,6 +1186,7 @@ function multiprompt {
   local multiprompt_visibility=( "${multiprompt_visibility[@]}" )
   local -a multiprompt_groups
   local -a multiprompt_predicates
+  valid_number 1 64 $2 && local -r num_columns=$2 || local -r num_columns=3
 
   read_arrays \
     multiprompt_promptfns \
@@ -1173,19 +1198,26 @@ function multiprompt {
     multiprompt_visibility
 
   for i in "${!multiprompt_fields[@]}"; do
+    local field="${multiprompt_fields[$i]}"
     multiprompt_groups[$i]="$(sed "s/[[:space:]]*\\([^\\[[:space:]]*\\)[^$]*$/\\1/g" <<< "${multiprompt_visibility[$i]}")"
     multiprompt_predicates[$i]="$(sed 's/\][[:space:]]*\[/|/g; s/[[:space:]]*\[/\[/g' <<< "${multiprompt_visibility[$i]}")"
-    if [ -z "${!multiprompt_fields[$i]}" ]; then # Value not already set.
+    if [ -z "${!field}" ]; then # Value not already set.
       if [ "${multiprompt_defaults[$i]}" = "=PROMPT" ]; then
         # Magic value "=PROMPT" so promp user now.
         ${multiprompt_promptfns[$i]} \
-          "${multiprompt_fields[$i]}" \
+          "${field}" \
           "${multiprompt_promptmsgs[$i]}" \
           "${multiprompt_labels[$i]}"
       else
         # Otherwise just set the default value.
-        export ${multiprompt_fields[$i]}="${multiprompt_defaults[$i]}"
+        export ${field}="${multiprompt_defaults[$i]}"
       fi
+    fi
+    if [ "${multiprompt_defaults[$i]}" = "=GROUP" ]; then
+      # Magic value "=GROUP", this item represents recursion into group.
+      multiprompt_defaults[$i]=""
+      [ -z "${multiprompt_promptfns[$i]}" ] &&
+        multiprompt_promptfns[$i]="multiprompt_group_prompt"
     fi
   done
 
@@ -1194,7 +1226,6 @@ function multiprompt {
 
   while : ; do
     local n=1
-    valid_number 1 64 $2 && ncolumns=$2 || ncolumns=3
     local table=""
     local -a selectmap
     for i in "${!multiprompt_fields[@]}"; do
@@ -1214,7 +1245,7 @@ function multiprompt {
       local promptmsg="${multiprompt_promptmsgs[$i]}"
       local display="$(${displayfn} ${field} "${label}" "${promptmsg}")"
       table+="|`printf \"%3s %s\" \"${n}.\" \"${display}\"`"
-      [ $(($n % ${ncolumns})) = 0 ] && table+=$'\n'
+      [ $(($n % ${num_columns})) = 0 ] && table+=$'\n'
       selectmap[$n]="$i"
       n=$((n+1))
     done
@@ -1246,6 +1277,11 @@ function multiprompt {
 # Hack, can't export globals so have to declare here and unset before using.
 declare -a fields
 declare -a labels
+
+# TODO document.
+function multiprompt_group_prompt {
+  GROUP="$1" PROMPT="$2" multiprompt "$3" "${num_columns}" <<< ""
+}
 
 # ----------------------------------------
 # recordsprompt(records, title, dislpayfn)
@@ -1593,25 +1629,23 @@ function argsprompt {
       multiprompt_displayfns
 
     for i in "${!multiprompt_fields[@]}"; do
+      local dflt="${multiprompt_defaults[$i]}"
+      local field="${multiprompt_fields[$i]}"
+      [ "${dflt}" = "=GROUP" ] &&
+        local defaultpfn="" ||
+        local defaultpfn="${promptfn}"
       [ -n "${multiprompt_promptfns[$i]}" ] &&
-        pfn="${multiprompt_promptfns[$i]}" ||
-        pfn="${promptfn}"
+          pfn="${multiprompt_promptfns[$i]}" ||
+          pfn="${defaultpfn}"
       [ -n "${multiprompt_displayfns[$i]}" ] &&
         dfn="${multiprompt_displayfns[$i]}" ||
         dfn="${displayfn}"
-      local dflt="${multiprompt_defaults[$i]}"
       case "${dflt}" in
-        "=GROUP")
-          dflt=""
-          [ -z "${a[8]}" ] && pfn="argsprompt_group_prompt"
-        ;;
         "=PROMPT"|"=REQUIRED")
-          local v="${multiprompt_fields[$i]}"
-          argsprompt_required["${#argsprompt_required[@]}"]="${v}"
+          argsprompt_required["${#argsprompt_required[@]}"]="${field}"
         ;;
         *)
-          [ -z "${!multiprompt_fields[$i]}" ] &&
-            export ${multiprompt_fields[$i]}="${dflt}"
+          [ -z "${!field}" ] && export ${multiprompt_fields[$i]}="${dflt}"
         ;;
       esac
       multiprompt_defaults[$i]="${dflt}"
@@ -1682,10 +1716,6 @@ function argsprompt {
     done
     break
   done
-}
-
-function argsprompt_group_prompt {
-  GROUP="$1" PROMPT="$2" multiprompt "$3" 1 <<< ""
 }
 
 #------------------------------------------------------------------------------
