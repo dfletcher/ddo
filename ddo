@@ -2641,6 +2641,11 @@ read -d "" keyexchange_CONFIG << EOF
 
 EOF
 
+# TODO document and move to utils section.
+function trim {
+  sed 's/^[[:space:]]*//g; s/[[:space:]]*$//g;' <<< "$1"
+}
+
 # TODO document and move to UI section.
 function serverprompt {
   local f
@@ -2671,7 +2676,14 @@ function serverprompt {
 # TODO document and move to UI section.
 function fileprompt {
   # TODO don't exit unless [ -f $result ]
-  textprompt "$@"
+  fileprompt_field="$1"
+  while : ; do
+    textprompt "$@"
+    export ${fileprompt_field}="$(trim "${!fileprompt_field}")"
+    [ -f "${!fileprompt_field}" ] && break
+    echo "Sorry I could not find or read file: ${!fileprompt_field}"
+    echo "Please try again."
+  done
 }
 
 function keyexchange_shorthelp {
