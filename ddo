@@ -1338,58 +1338,88 @@ function recordsprompt {
   local -r prompt="$(get PROMPT 'Choose a record to edit or press [ENTER] to confirm')"
   local -r title="$(get TITLE "Choose ${recordslabel} to edit or press [ENTER] to confirm")"
 
-  # If we haven't read fields off the input stream yet, do so.
-  if [ ${#recordsprompt_fields[@]} = 0 ]; then
+  if [ -z "$recordsprompt_fields" ]; then
+
     local -a recordsprompt_promptfns
     local -a recordsprompt_displayfns
     local -a recordsprompt_defaults
     local -a recordsprompt_fields
     local -a recordsprompt_labels
-    local -a recordsprompt_promptlabels
-    while IFS="|" read promptfn displayfn default field label promptlabel; do
-      recordsprompt_promptfns[${#recordsprompt_promptfns[@]}]=${promptfn}
-      recordsprompt_displayfns[${#recordsprompt_displayfns[@]}]=${displayfn}
-      recordsprompt_defaults[${#recordsprompt_defaults[@]}]="$(sed 's/^[[:space:]]*//g' <<< "${default}" | sed 's/[[:space:]]*$//g')"
-      recordsprompt_fields[${#recordsprompt_fields[@]}]=${field}
-      recordsprompt_labels[${#recordsprompt_labels[@]}]="$(sed 's/^[[:space:]]*//g' <<< "${label}" | sed 's/[[:space:]]*$//g')"
-      recordsprompt_promptlabels[${#recordsprompt_promptlabels[@]}]="$(sed 's/^[[:space:]]*//g' <<< "${promptlabel}" | sed 's/[[:space:]]*$//g')"
-    done
+    local -a recordsprompt_promptmsgs
+
+    # Parse the config.
+    read_arrays \
+      recordsprompt_promptfns \
+      recordsprompt_displayfns \
+      recordsprompt_defaults \
+      recordsprompt_fields \
+      recordsprompt_labels \
+      recordsprompt_promptmsgs
   fi
 
   # Loop. If multiprompt returns with 1 we regenerate the menu.
   while : ; do
 
-    local config=""
     local keys="$(recordskeys ${recordsfield})"
+    local multiprompt_fields=( )
+    local multiprompt_defaults=( )
+    local multiprompt_labels=( )
+    local multiprompt_promptmsgs=( )
+    local multiprompt_visibility=( )
+    local multiprompt_promptfns=( )
+    local multiprompt_displayfns=( )
 
-    # Prompt config: add records listings
+    # multiprompt config: add records listings
     for k in ${keys}; do
-      config+="recordsprompt_group_prompt|${recorddisplayfn}||${recordsfield}|${k}|${recordsprompt_fields[@]}|"$'\n'
+      multiprompt_promptfns[${#multiprompt_promptfns[@]}]="recordsprompt_group_prompt"
+      multiprompt_displayfns[${#multiprompt_displayfns[@]}]="${recorddisplayfn}"
+      multiprompt_defaults[${#multiprompt_defaults[@]}]=""
+      multiprompt_fields[${#multiprompt_fields[@]}]="${recordsfield}"
+      multiprompt_labels[${#multiprompt_labels[@]}]="${k}"
+      multiprompt_promptmsgs[${#multiprompt_promptmsgs[@]}]="${recordsprompt_fields[@]}"
+      multiprompt_visibility[${#multiprompt_visibility[@]}]=""
     done
 
-    # Prompt config: edit individual records
-    for i in ${!recordsprompt_fields[@]}; do
+    # multiprompt config: edit individual records
+    for i in ${!recordsprompt_promptfns[@]}; do
       for k in ${keys}; do
-        local field=$(ns ${recordsfield} _ ${k} _ ${recordsprompt_fields[$i]})
-        config+="${recordsprompt_promptfns[$i]}|${recordsprompt_displayfns[$i]}|${recordsprompt_defaults[$i]}|${field}|${recordsprompt_labels[$i]}|${recordsprompt_promptlabels[$i]}|$k"$'\n'
+        multiprompt_promptfns[${#multiprompt_promptfns[@]}]="${recordsprompt_promptfns[$i]}"
+        multiprompt_displayfns[${#multiprompt_displayfns[@]}]="${recordsprompt_displayfns[$i]}"
+        multiprompt_defaults[${#multiprompt_defaults[@]}]="${recordsprompt_defaults[$i]}"
+        multiprompt_fields[${#multiprompt_fields[@]}]="$(ns ${recordsfield} _ ${k} _ ${recordsprompt_fields[$i]})"
+        multiprompt_labels[${#multiprompt_labels[@]}]="${recordsprompt_labels[$i]}"
+        multiprompt_promptmsgs[${#multiprompt_promptmsgs[@]}]="${recordsprompt_promptmsgs[$i]}"
+        multiprompt_visibility[${#multiprompt_visibility[@]}]="${k}"
       done
     done
 
-    # Prompt config: "add new record" controls
+    # multiprompt config: "add new record" controls
     if [ -n "${addfn}" ]; then
-      config+="recordsprompt_addfn_prompt|recordsprompt_addfn_display||${recordsfield}|${recordsprompt_fields[@]}|${keys}|"$'\n'
+      multiprompt_promptfns[${#multiprompt_promptfns[@]}]="recordsprompt_addfn_prompt"
+      multiprompt_displayfns[${#multiprompt_displayfns[@]}]="recordsprompt_addfn_display"
+      multiprompt_defaults[${#multiprompt_defaults[@]}]=""
+      multiprompt_fields[${#multiprompt_fields[@]}]="${recordsfield}"
+      multiprompt_labels[${#multiprompt_labels[@]}]="${multiprompt_fields[@]}"
+      multiprompt_promptmsgs[${#multiprompt_promptmsgs[@]}]="${keys}"
+      multiprompt_visibility[${#multiprompt_visibility[@]}]=""
     fi
 
-    # Prompt config: "delete record" controls
+    # multiprompt config: "delete record" controls
     if [ -n "${delfn}" ]; then
       for k in ${keys}; do
-        config+="recordsprompt_delfn_prompt|recordsprompt_delfn_display||${recordsfield}|${recordsprompt_fields[@]}|${k}|${k}"$'\n'
+        multiprompt_promptfns[${#multiprompt_promptfns[@]}]="recordsprompt_delfn_prompt"
+        multiprompt_displayfns[${#multiprompt_displayfns[@]}]="recordsprompt_delfn_display"
+        multiprompt_defaults[${#multiprompt_defaults[@]}]=""
+        multiprompt_fields[${#multiprompt_fields[@]}]="${recordsfield}"
+        multiprompt_labels[${#multiprompt_labels[@]}]="${multiprompt_fields[@]}"
+        multiprompt_promptmsgs[${#multiprompt_promptmsgs[@]}]="${k}"
+        multiprompt_visibility[${#multiprompt_visibility[@]}]="${k}"
       done
     fi
 
     # Prompt.
-    PROMPT="${prompt}" multiprompt "${title}" "1" <<< "${config}"
-    [ $? = 1 ] || return 1
+    PROMPT="${prompt}" multiprompt "${title}" "1" <<< ""
+    [ $? = 1 ] || break
 
   done
 }
@@ -1601,19 +1631,19 @@ function argsprompt {
   local pfn
   local dfn
 
-  if [ -z "$multiprompt_promptfns" ]; then
+  if [ -z "$multiprompt_fields" ]; then
 
     local -a multiprompt_fields
     local -a multiprompt_defaults
     local -a multiprompt_labels
     local -a multiprompt_promptmsgs
-    local -a argsprompt_longopts
-    local -a argsprompt_shortopts
-    local -a argsprompt_descriptions
     local -a multiprompt_visibility
     local -a multiprompt_promptfns
     local -a multiprompt_displayfns
     local -a argsprompt_required
+    local -a argsprompt_longopts
+    local -a argsprompt_shortopts
+    local -a argsprompt_descriptions
 
     # Parse the config.
     read_arrays \
@@ -2409,7 +2439,6 @@ function addserver_apache2vhosts_prompt {
   GROUP="" \
     recordsprompt apache2vhosts "virtual host" \
     addserver_apache2vhosts_display <<< "${addserver_apache2vhosts_RECORD}"
-  # TODO: there's a bug here, it's jumping up two menu levels after exit.
 }
 
 function addserver_httpdtype_prompt {
