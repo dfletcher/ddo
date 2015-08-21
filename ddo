@@ -204,13 +204,13 @@ function ssh_pw_required {
 #   sshcmd mysite.com fletch ping # Prints `uname -a` from the server.
 #
 function sshcmd {
-  local host=$1; shift
-  local user=$1; shift
-  local options=$(get SSH_OPTIONS)
-  local identity=$(get IDENTITY_FILE)
-  [ -f "$identity" ] && options+=" -i ${identity}"
-  [ -n "$user" ] && options+=" -l ${user}"
-  options+=" ${host}"
+  local -r sshcmd_host=$1; shift
+  local -r sshcmd_user=$1; shift
+  local -r sshcmd_identity=$(get IDENTITY_FILE)
+  local sshcmd_options=$(get SSH_OPTIONS)
+  [ -f "${sshcmd_identity}" ] && sshcmd_options+=" -i ${sshcmd_identity}"
+  [ -n "${sshcmd_user}" ] && sshcmd_options+=" -l ${sshcmd_user}"
+  sshcmd_options+=" ${sshcmd_host}"
   local script="arguments=( $(printf " %q" "$@") )"$'\n'
   script+="$(cat "$SCRIPTPATH")"$'\n'
   # So far this rather clumsy method of passing the entire script as the
@@ -218,7 +218,7 @@ function sshcmd {
   # and running it in a single shot. Attempts to do it using stdin break
   # SSH's pty and then prompting functions and sudo fail to work on remote.
   # Still looking for a nicer way to achieve it.
-  ${SSH} -Ctt ${options} "${script}" 2>&1 | grep -v "^Connection to .* closed\..*$"
+  ${SSH} -Ctt ${sshcmd_options} "${script}" 2>&1 | grep -v "^Connection to .* closed\..*$"
 }
 
 # -------------------
@@ -249,14 +249,14 @@ function sshcmd {
 #   remote mysite ping # Prints `uname -a` from the server.
 #
 function remote {
-  local -r server="$1"; shift
-  loadserver "${server}" || return 255
-  local -r identity="$(get $(ns ${server} _identity))"
-  local -r options="$(get $(ns ${server} _sshopts))"
-  local -r user="$(get $(ns ${server} _user))"
-  local -r host="$(get $(ns ${server} _host))"
-  IDENTITY_FILE="${identity}" SSH_OPTIONS="${options}" \
-    sshcmd "${host}" "${user}" --remote "$@"
+  local -r remote_server="$1"; shift
+  loadserver "${remote_server}" || return 255
+  local -r remote_identity="$(get $(ns ${remote_server} _identity))"
+  local -r remote_options="$(get $(ns ${remote_server} _sshopts))"
+  local -r remote_user="$(get $(ns ${remote_server} _user))"
+  local -r remote_host="$(get $(ns ${remote_server} _host))"
+  IDENTITY_FILE="${remote_identity}" SSH_OPTIONS="${remote_options}" \
+    sshcmd "${remote_host}" "${remote_user}" --remote "$@"
 }
 
 # -----------------------
@@ -1017,34 +1017,35 @@ function pwprompt {
 # SEE ALSO: multiprompt for promptfn details.
 #
 function serverprompt {
+  local -r serverprompt_field="$1"
   local f
   local config=""
-  local -r serverprompt_field="$1"
-  local -a servers
-  for f in "$(ls "$SCRIPTHOME/servers/"*.server)"; do
+  local -a serverprompt_servers
+  local -a serverprompt_server_files
+  mapfile serverprompt_server_files < <(ls "$SCRIPTHOME/servers/"*.server) 
+  for f in "${serverprompt_server_files[@]}"; do
     local n="$(basename "${f}")"
     local server="$(sed 's/\.server//g' <<< "${n}")"
     loadserver "${server}"
     local host="$(get $(ns "${server}" _host))"
     config+="${server}|${server}: ${host}"$'\n'
-    servers[${#servers[@]}]="${server}"
+    serverprompt_servers[${#serverprompt_servers[@]}]="${server}"
   done
-  # TODO if 0 servers, fatal; if 1 server, auto pick; else prompt.
-  if [ ${#servers[@]} = 0 ]; then
+  if [ ${#serverprompt_servers[@]} = 0 ]; then
     fatal "No servers are configured, please run $PROGRAM addserver."
-  elif [ ${#servers[@]} = 1 ]; then
+  elif [ ${#serverprompt_servers[@]} = 1 ]; then
     echo
-    echo "Only one server is configured, selecting \"${servers[0]}\"."
-    export ${serverprompt_field}="${servers[0]}"
+    export ${serverprompt_field}="${serverprompt_servers[0]}"
+    echo "Only one server is configured, selecting \"${!serverprompt_field}\"."
   else
-    PROMPT="" radioprompt "${!serverprompt_field}" "$2" 3 <<< "${config}"
+    PROMPT="" radioprompt "${!serverprompt_field}" "$2" 1 <<< "${config}"
     export ${serverprompt_field}="${selected_value}"
   fi
 }
 
-# --------------------------------------------
-# fileprompt(fieldname, prompt_message, label)
-# --------------------------------------------
+# -----------------------------------------------
+# fileselprompt(fieldname, prompt_message, label)
+# -----------------------------------------------
 #
 # Implements multiprompt/promptfn().
 #
@@ -1053,15 +1054,48 @@ function serverprompt {
 #
 # SEE ALSO: multiprompt for promptfn details.
 #
-function fileprompt {
-  fileprompt_field="$1"
+function fileselprompt {
+  local -r fileselprompt_field="$1"
   while : ; do
     textprompt "$@"
-    export ${fileprompt_field}="$(trim "${!fileprompt_field}")"
-    [ -f "${!fileprompt_field}" ] && break
-    echo "Sorry I could not find or read file: ${!fileprompt_field}"
+    export ${fileselprompt_field}="$(trim "${!fileselprompt_field}")"
+    [ -f "${!fileselprompt_field}" ] && break
+    echo "Sorry I could not find or read file: ${!fileselprompt_field}"
     echo "Please try again."
   done
+}
+
+# -----------------------------------------------
+# filenewprompt(fieldname, prompt_message, label)
+# -----------------------------------------------
+#
+# Implements multiprompt/promptfn().
+#
+# Presents a file selection prompt. Supports autocomplete. Function loops and
+# will not exit if the file cannot be written or already exists.
+#
+# SEE ALSO: multiprompt for promptfn details.
+#
+function filenewprompt {
+  local -r filenewprompt_field="$1"
+  while : ; do
+    textprompt "$@"
+    if [ -f "${!filenewprompt_field}" ]; then
+      echo "File ${!filenewprompt_field} already exists, cannot overwrite."
+    else
+      touch "${!filenewprompt_field}"
+      if [ -w "${!filenewprompt_field}" ]; then
+        rm "${!filenewprompt_field}"
+        export ${filenewprompt_field}="$(trim "${!filenewprompt_field}")"
+        break
+      else
+        rm "${!filenewprompt_field}"
+        echo "No permission to write file ${!filenewprompt_field}. This is not really supposed to be possible."
+      fi
+    fi
+    echo "Please try again."
+  done
+  return 0
 }
 
 # --------------------------------------------
@@ -1091,9 +1125,9 @@ function cboxprompt {
 #
 function radprompt {
   # Don't bother with input, just toggle the state.
-  export selected_index="${i}" # $i = selected index
+  export selected_index="$((${i}-1))" # $i = selected index
   export selected_value="$1" # $1 = field name
-  export selected_label="${labels[$selected_index]}"
+  export selected_label="${multiprompt_labels[${selected_index}]}"
 }
 
 # ------------------------------------------------------------
@@ -1216,7 +1250,7 @@ function recordsprompt_delfn_display {
 # SEE ALSO: multiprompt for displayfn details.
 #
 function raddisplay {
-  [ "${selected_index}" = "${n}" ] && echo "(*) $2" || echo "( ) $2"
+  [ "${selected_index}" = "$((${n}-1))" ] && echo "(*) $2" || echo "( ) $2"
 }
 
 # ---------------------------------------------
@@ -1774,17 +1808,17 @@ function argsprompt {
 
   if [ -z "$multiprompt_fields" ]; then
 
-    local -a multiprompt_fields
-    local -a multiprompt_defaults
-    local -a multiprompt_labels
-    local -a multiprompt_promptmsgs
-    local -a multiprompt_visibility
-    local -a multiprompt_promptfns
-    local -a multiprompt_displayfns
-    local -a argsprompt_required
-    local -a argsprompt_longopts
-    local -a argsprompt_shortopts
-    local -a argsprompt_descriptions
+    local multiprompt_fields=( )
+    local multiprompt_defaults=( )
+    local multiprompt_labels=( )
+    local multiprompt_promptmsgs=( )
+    local multiprompt_visibility=( )
+    local multiprompt_promptfns=( )
+    local multiprompt_displayfns=( )
+    local argsprompt_required=( )
+    local argsprompt_longopts=( )
+    local argsprompt_shortopts=( )
+    local argsprompt_descriptions=( )
 
     # Parse the config.
     read_arrays \
@@ -2077,38 +2111,17 @@ function cboxpreprocess {
 #       lemons       |   Lemons
 #       limes        |   Limes
 #   EOF
-#   echo "You picked: $selected_label ($selected_value)"
+#   echo "You picked: ${selected_label} ($selected_value)"
 #
 # See STDIN above for column definitions.
 #
 function radioprompt {
-  [ -z "$3" ] && ncolumns=3 || ncolumns="$3"
-  [ -n "$PROMPT" ] && msg="$PROMPT" || \
-    msg="Toggle items by number or press [ENTER] to confirm"
+  [ -z "$3" ] && local -r num_columns=3 || local -r num_columns="$3"
+  local -r msg="$(get PROMPT "Toggle items or press [ENTER] to confirm")"
   export selected_value="$1"
-  PREPROCESS="radpreprocess" INIT="radinit" PROMPT="$msg" GROUP="" \
-    multiprompt "$2" "$ncolumns"
-}
-
-# -------------------
-# radpreprocess(line)
-# -------------------
-#
-# PREPROCESS() implementation used by radioprompt().
-#
-# See read_filtered() / VARS / PREPROCESS for details.
-#
-# ARGS:  - line: Line to preprocess.
-#
-# STDIN:   Unused
-#
-# STDOUT:  radioprompt overrides.
-#
-# VARS:    None
-#
-# RETURN:  Unused
-function radpreprocess {
-  echo "radprompt | raddisplay | | $1 |"
+  export selected_index=""
+  PREFIX="radprompt | raddisplay | |" INIT="radinit" PROMPT="${msg}" GROUP="" \
+    multiprompt "$2" "${num_columns}"
 }
 
 # ---------
@@ -2135,19 +2148,22 @@ function radpreprocess {
 #
 function radinit {
   # Figure out the $selected_index using the $selected_value and fields array.
-  n=1
-  for field in "${multiprompt_fields[@]}"; do
-    # If field value equals selected value, we found the $selected_index ($n).
-    [ "${selected_value}" = "${field}" ] && break
-    n=$((n+1))
-  done
-  if [ ${#multiprompt_fields[@]} = $(($n-1)) ]; then
-    # There was no valid $selected_value so pick "1" and configure for it.
-    n=1
-    export selected_value="${multiprompt_fields[$n]}"
+  if [ -z "${selected_index}" ]; then
+    n=0
+    for field in "${multiprompt_fields[@]}"; do
+      # If field value equals selected value, we found the $selected_index ($n).
+      [ "${selected_value}" = "${field}" ] && break
+      n=$((n+1))
+    done
+    if [ ${#multiprompt_fields[@]} = ${n} ]; then
+      # There was no valid $selected_value so pick "1" and configure for it.
+      n=0
+      export selected_value="${multiprompt_fields[$n]}"
+      export selected_label="${multiprompt_labels[$n]}"
+    fi
+    export selected_index="$n"
   fi
-  export selected_index="$n"
-  export selected_label="${multiprompt_labels[$n]}"
+  export selected_label="${multiprompt_labels[${selected_index}]}"
 }
 
 #------------------------------------------------------------------------------
@@ -2231,7 +2247,7 @@ function keyexchange_remote_command {
 
   # Parse the key.
   local key="$1"
-  [ -z "$key" ] && fatal "No key given."
+  [ -z "${key}" ] && fatal "No key given."
 
   local type pubkey id
   IFS=" " read type pubkey id <<< "${key}"
@@ -2242,19 +2258,21 @@ function keyexchange_remote_command {
   if [ -f "${keyfile}" ]; then
     if grep "${pubkey}" "${keyfile}" >> /dev/null; then
       # Key already in authorized_keys.
-      echo "Key is already in file ${keyfile}, skipping."
+      echo "Key is already in file ${keyfile} on $(hostname), skipping."
     else
       # Append the file.
       echo "${key}" >> "${keyfile}"
       grep "${pubkey}" "${keyfile}" >> /dev/null ||
         fatal "Could not append key to file ${keyfile}."
-      echo "Added key to ${keyfile}."
+      echo "Added key to ${keyfile} on $(hostname)."
     fi
   else
     # No existing file just write a new one.
     echo "${key}" > "${keyfile}"
-    [ -f "${keyfile}" ] || fatal "Could not create file ${keyfile}."
-    echo "Created ${keyfile}."
+    [ -f "${keyfile}" ] ||
+      fatal "Could not create file ${keyfile} on $(hostname)."
+    chmod 0600 "${keyfile}"
+    echo "Created ${keyfile} on $(hostname)."
   fi
 }
 
@@ -2607,17 +2625,17 @@ function addserver_command {
     fatal "Could not write server configuraion in $file."
   fi
   identity=$(get $(ns ${addserver_alias} _identity))
-  user=$(get $(ns ${addserver_alias} _user))
-  host=$(get $(ns ${addserver_alias} _host))
-  opts=$(get $(ns ${addserver_alias} _sshopts))
+  local -r serveruser=$(get $(ns ${addserver_alias} _user))
+  local -r host=$(get $(ns ${addserver_alias} _host))
+  local -r opts=$(get $(ns ${addserver_alias} _sshopts))
 
   # Offer key exchange if the server is requiring a password.
   unset exchange_args
   local exchange_results="[NOT NEEDED]"
-  if ssh_pw_required "${host}" "${user}" "${identity}" "${opts}"; then
+  if ssh_pw_required "${host}" "${serveruser}" "${identity}" "${opts}"; then
     echo
     paragraph <<EOF
-      The SSH command requires a password for user "${user}" at \
+      The SSH command requires a password for user "${serveruser}" at \
       host "${host}". It will ask for it quite often during normal \
       operations. If you wish, we can attempt a key exchange with the remote \
       server after which the password will not be required. Note that you can \
@@ -2625,15 +2643,7 @@ function addserver_command {
 EOF
     # Do key exchange if requested.
     if ynprompt v "Exchange public key with host ${host}?"; then
-      echo; echo "Exchanging keys..."
-      # TODO handle other key types.
-      # TODO get better control of ssh-keygen here.
-      [ -f ~/.ssh/id_rsa.pub ] || ssh-keygen -t rsa -b 4096
-      if exchange_results="$(keyexchange ~/.ssh/id_rsa.pub "${addserver_alias}")"; then
-        echo "Key exchange succeeded: ${exchange_results}"
-      else
-        echo "Key exchange failed, sorry. Server said: ${exchange_results}."
-      fi
+      keyexchange "${addserver_alias}"
     fi
   fi
 
@@ -2666,7 +2676,7 @@ EOF
     Add new server
     _
     alias          | ${addserver_alias}
-    user           | ${user}
+    user           | ${serveruser}
     host           | ${host}
     system         | ${remoteuname}
     identity file  | $(get identity "[NOT SET]")
@@ -2675,10 +2685,10 @@ EOF
 EOF
   MARGIN="3" paragraph <<EOF
     _
-    Connection to host ${host} with user ${user} is confirmed. Server with \
-    alias "${addserver_alias}" was successfully configured.
-    Note that user ${user}@${host} must have administrative privileges or \
-    must be configured to use sudo.
+    Connection to host ${host} with user ${serveruser} is confirmed. Server \
+    with alias "${addserver_alias}" was successfully configured.
+    Note that user ${serveruser}@${host} must have administrative privileges \
+    or must be configured to use sudo.
 EOF
 # TODO note about what exact admin privs user needs above.
 # TODO test apachectl access
@@ -2688,24 +2698,145 @@ EOF
 # USER COMMAND: keyexchange
 #--------------------------
 
-# TODO: keyexchange_addkey arg-command here that calls ssh-keygen, and remove
-# the ssh-keygen from addserver and use this instead.
-# TODO: replace the hard-coded ~/.ssh/id_rsa.pub with a function that searches
-# for public keys. Also maybe a custom prompt for picking .pub found in .ssh
-# or some other arbitrary file.
 read -d "" keyexchange_CONFIG << EOF
 
   keyexchange_server | =PROMPT | \
     Server alias | Server alias | \
     --server | -s | Server alias. | \
-    | serverprompt
+    | keyexchange_serverprompt
 
-  keyexchange_keyfile | $(echo ~/.ssh/id_rsa.pub) | \
-    Key file | Key file | \
-    --file | -f | Key file. | \
-    | fileprompt
+  keyexchange_keyfile | =PROMPT | \
+    Key file | SSH key file | \
+    --key-file | -f | SSH key file. | \
+    | keyexchange_keyfile_prompt | keyexchange_keyfile_display
+
+  keyexchange_keytype || \
+    Key type | Key type | \
+    --key-type | -t | Key type. | \
+    [keyexchange_keyfile=create] | \
+    keyexchange_keytype_prompt | keyexchange_keytype_display
+
+  keyexchange_keysize || \
+    Key size | Key size | \
+    --key-size | -b | Key size. | \
+    [keyexchange_keyfile=create] | \
+    keyexchange_keysize_prompt
 
 EOF
+
+function keyexchange_serverprompt {
+  if [ -n "${keyexchange_force_server}" ]; then
+    export $1="${keyexchange_force_server}"
+    return 0
+  fi
+  serverprompt "$@"
+}
+
+function keyexchange_keyfile_prompt {
+  local config
+  local -a existing_keys
+  for i in "${!keytypes[@]}"; do
+    if [ -f ~/.ssh/id_${keytypes[$i]}.pub ]; then
+      config+="${keytypes[$i]}|id_${keytypes[$i]}.pub"$'\n'
+      existing_keys[${#existing_keys[@]}]="${keytypes[$i]}"
+    fi
+  done
+  [ ${#existing_keys[@]} = ${#keytypes[@]} ] ||
+    config+="create|Create new key"$'\n'
+  if [ ${#existing_keys[@]} = 0 ]; then
+    local selected_value="create"
+    local selected_label="[new key]"
+    echo
+    echo "No keys exist in ~/.ssh, creating one."
+  else
+    PROMPT="Select file or press [ENTER] to confirm selection" \
+      radioprompt "${keyexchange_keyfile}" "$2" 1 <<< "${config}"
+  fi
+  export keyexchange_keyfile="${selected_value}"
+  export keyexchange_keyfile_label="${selected_label}"
+  [ -z "${keyexchange_keytype}" ] &&
+    keyexchange_keytype_prompt keyexchange_keytype \
+      "${multiprompt_labels[2]}" "${multiprompt_promptmsgs[2]}"
+  return 0
+}
+
+function keyexchange_keyfile_display {
+  echo "$2: ${keyexchange_keyfile_label}"
+}
+
+function keyexchange_keytype_prompt {
+  [ "${keyexchange_keyfile}" = "create" ] || return 0
+  [ -z "${keyexchange_keytype}" ] && export keyexchange_keytype=rsa
+  local config=""
+  local -a optionsenabled
+  for i in "${!keytypes[@]}"; do
+    if [ ! -f ~/.ssh/id_${keytypes[$i]}.pub ]; then
+      config+="${keytypes[$i]}|${keylabels[$i]}"$'\n'
+      optionsenabled[${#optionsenabled[@]}]="${keytypes[$i]}"
+    fi
+  done
+  PROMPT="Choose key type" \
+    radioprompt "${keyexchange_keytype}" "$2" "$3" <<< "${config}"
+  local new_keytype_name="id_${optionsenabled[${selected_index}]}"
+  [ "${new_keytype_name}" != "${keyexchange_keytype_name}" ] &&
+    keyexchange_keysize="" # Reset key size when changing types.
+  export keyexchange_keytype="${selected_value}"
+  export keyexchange_keytype_name="${new_keytype_name}"
+  export keyexchange_keytype_label="${selected_label}"
+  if [ -n "${keyexchange_keysize}" ]; then
+    keyexchange_keysize_validate ||
+      keyexchange_keysize="" keyexchange_keysize_validate 
+  fi
+  [ -z "${keyexchange_keysize}" ] &&
+    keyexchange_keysize_prompt keyexchange_keysize \
+      "${multiprompt_labels[3]}" "${multiprompt_promptmsgs[3]}"
+  return 0
+}
+
+function keyexchange_keytype_display {
+  echo "$2: ${keyexchange_keytype_label}"
+}
+
+function keyexchange_keysize_prompt {
+  [ "${keyexchange_keyfile}" = "create" ] || return 0
+  keyexchange_keysize_validate
+  while : ; do
+    case "${keyexchange_keytype}" in
+      rsa)
+        textprompt "$@" # TODO FIXME
+      ;;
+      dsa)
+        echo $'\n'"Key size for DSA key set to 1024."
+        export keyexchange_keysize=1024
+      ;;
+    esac
+    keyexchange_keysize_validate && break ||
+      echo $'\n'"Invalid key size \"${keyexchange_keysize}\" please choose a value in range. See the -b option i n\`man ssh-keygen\` for details."
+  done
+}
+
+function keyexchange_keysize_validate {
+  case "${keyexchange_keytype}" in
+    rsa)
+      if [ -z "${keyexchange_keysize}" ]; then
+        export keyexchange_keysize=2048
+        return 0
+      else
+        valid_number 768 16384 "${keyexchange_keysize}"
+        return $?
+      fi
+    ;;
+    dsa)
+      if [ -z "${keyexchange_keysize}" ]; then
+        export keyexchange_keysize=1024
+        return 0
+      else
+        [ "${keyexchange_keysize}" = 1024 ]
+        return $?
+      fi
+    ;;
+  esac
+}
 
 function keyexchange_shorthelp {
   echo "Exchange SSH keys with a server."
@@ -2717,60 +2848,94 @@ function keyexchange_help {
 EOL
 }
 
-# Workhorse function for keyexchange command, also utility used by addserver.
-function keyexchange {
+function keyexchange_preflight {
 
-  local keyfile="$1"
-  local server="$2"
+  # Keys we support.
+  local keytypes=( rsa dsa )
+  local keylabels=( RSA DSA )
 
-  # Read key file.
-  if [ ! -f "$keyfile" ]; then
-    echo "Could not open key file ${keyfile}."
-    return 1
+  # Process arguments.
+  PROMPT="Choose item to edit or press [ENTER] to exchange keys" \
+    argsprompt "Key exchange" 1 <<< "${keyexchange_CONFIG}"
+
+  # Find path to public key.
+  if [ "${keyexchange_keyfile}" = "create" ]; then
+    # In create mode, invoke ssh-keygen.
+    local -r filepath=~/.ssh/${keyexchange_keytype_name}
+    local -a keygenargs
+    keygenargs[${#keygenargs[@]}]="-q"
+    if [ "${keyexchange_keytype}" != "dsa" -a "${keyexchange_keytype}" != "ed25519" ]; then
+      keygenargs[${#keygenargs[@]}]="-b"
+      keygenargs[${#keygenargs[@]}]="${keyexchange_keysize}"
+    fi
+    keygenargs[${#keygenargs[@]}]="-t"
+    keygenargs[${#keygenargs[@]}]="${keyexchange_keytype}"
+    keygenargs[${#keygenargs[@]}]="-f"
+    keygenargs[${#keygenargs[@]}]="${filepath}"
+    echo $'\n'"Note: pick no passphrase or you will be typing it a lot. If you do pick a passphrase make it easy to type."$'\n'
+    ssh-keygen "${keygenargs[@]}" || fatal "Error running ssh-keygen."
+    chmod 0600 "${filepath}"
+    chmod 0600 "${filepath}.pub"
+    local -r pubkey="${filepath}.pub"
+  else
+    # Using existing key ${keyexchange_keyfile}.pub
+    local -r pubkey=~/".ssh/id_${keyexchange_keyfile}.pub"
   fi
-  read key < "$keyfile"
-  if [ -z "$key" ]; then
-    echo "Could not read key from file ${keyfile}."
-    return 2
-  fi
+
+  # Test read the key.
+  [ ! -f "${pubkey}" ] &&
+    fatal "Could not open key file ${pubkey}."
+  read keyexchange_key < "${pubkey}"
+  [ -z "${keyexchange_key}" ] &&
+    fatal "Could not read key from file ${pubkey}."
+  export keyexchange_key
 
   # Load server data.
-  if ! loadserver "${server}"; then
-    echo "Cannot load server \"${server}\"."
-    return 4
+  if ! loadserver "${keyexchange_server}"; then
+    fatal "Cannot load server \"${keyexchange_server}\"."
   fi
-  user=$(get $(ns ${server} _user))
-  host=$(get $(ns ${server} _host))
-  identity=$(get $(ns ${server} _identity))
-  opts=$(get $(ns ${server} _sshopts))
-
-  # Execute remote key exchange command.
-  local result="$(remote "${server}" keyexchange_remote "${key}")"
-  if [ $? = 0 ]; then
-    if ssh_pw_required "${host}" "${user}" "${identity}" "${opts}"; then
-      [ -n "$result" ] &&
-        echo "Reason unknown. Remote host said: \"$result\"." ||
-        echo "Reason unknown."
-      return 5
-    else
-      echo "$result"
-      return 0
-    fi
-  else
-    echo "$result"
-    return 6
-  fi
+  
+  keyexchange_keysize_validate || return 4
 }
 
 function keyexchange_command {
 
-  # Process arguments.
-  PROMPT="Choose item to edit or press [ENTER] to exchange keys" \
-    argsprompt "Key exchange" 1 "$@" <<< "${keyexchange_CONFIG}"
+  # Execute remote key exchange command.
+  echo $'\n'"Exchanging keys..."
+  local result="$(remote "${keyexchange_server}" keyexchange_remote "${keyexchange_key}")"
+  
+  # Command succeeded?
+  if [ $? = 0 ]; then
 
-  # Exchange keys.
-  echo
-  keyexchange "${keyexchange_keyfile}" "${keyexchange_server}"
+    # Load server variables.
+    local -r u=$(get $(ns ${keyexchange_server} _user))
+    local -r h=$(get $(ns ${keyexchange_server} _host))
+    local -r id=$(get $(ns ${keyexchange_server} _identity))
+    local -r o=$(get $(ns ${keyexchange_server} _sshopts))
+
+    # Run the ssh_pw_required test.
+    if ssh_pw_required "${h}" "${u}" "${id}" "${o}"; then
+      [ -n "${result}" ] &&
+        fatal "Remote host said: \"${result}\"." ||
+        fatal "Reason unknown."
+    else
+      echo $'\n'"Success: ${result}"
+    fi
+
+  else
+    # Command failed.
+    fatal "${result}"
+  fi
+}
+
+# -------------------
+# keyexchange(server)
+# -------------------
+# Argument based key exchange utility. TODO better docs.
+function keyexchange {
+  keyexchange_force_server="$1"
+  keyexchange_preflight
+  keyexchange_command
 }
 
 #------------------------
