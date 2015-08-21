@@ -79,17 +79,11 @@ function get {
 # USAGE EXAMPLE:
 #
 #   repeat 5 "hello"        # "hellohellohellohellohello"
-#   repeat 5 "hello  "      # "hello hello hello hello hello"
-#   "$(repeat 5 'hello  ')" # "hello  hello  hello  hello  hello  "
+#   repeat 5 "hello "       # "hello hello hello hello hello"
 #
 function repeat {
-  # TODO: validate that $1 is an integer and is >= 0.
-  [ "$2" = $'\n' ] && v=$'\n ' || v="$2"
-  unset str
-  for i in $(seq 1 $1); do
-    str+="$v"
-  done
-  printf '%b' "$str"
+  local -r n=( $(seq 1 "$1") )
+  printf "%0.0s$2" "${n[@]}"
 }
 
 # ------------------
@@ -127,11 +121,12 @@ function loadserver {
   file="$SCRIPTHOME/servers/$1.server"
   [ -f "$file" ] || return 1
   . "$file" || return 1
-  n=$(ns $1 _alias); export $n="${!n}"
-  n=$(ns $1 _host); export $n="${!n}"
-  n=$(ns $1 _user); export $n="${!n}"
-  n=$(ns $1 _identity); export $n="${!n}"
-  n=$(ns $1 _options); export $n="${!n}"
+  local n
+  n=$(ns "$1" _alias); declare -x "${n}=${!n}"
+  n=$(ns "$1" _host); declare -x "${n}=${!n}"
+  n=$(ns "$1" _user); declare -x "${n}=${!n}"
+  n=$(ns "$1" _identity); declare -x "${n}=${!n}"
+  n=$(ns "$1" _options); declare -x "${n}=${!n}"
   # TODO test required values and check alias against $1
   return 0
 }
@@ -147,7 +142,7 @@ function loadserver {
 #        - host: ssh host
 #
 #        - identity_file: ssh .pem identity file (-i) (optional). If a valid
-#          identity file is supplied this function returns false (nonzero).
+#          identity file is supplied, function should return false (nonzero).
 #
 #        - ssh_options: additional ssh options (optional).
 #
@@ -167,11 +162,22 @@ function loadserver {
 #     echo "A password is required to login to mysite.com with user fletch."
 #
 function ssh_pw_required {
-  args="-n -o PasswordAuthentication=no"
-  [ -f "$3" ] && args+=" -i $3"
-  [ -n "$4" ] && args+=" $4"
-  args+=" -l $2 $1"
-  ! ${SSH} $args 2> /dev/null # Invert to answer the question of the function.
+  local -a args
+  local opts=( $(printf "%s" "$4") )
+  args[${#args[@]}]="-n"
+  args[${#args[@]}]="-o"
+  args[${#args[@]}]="PasswordAuthentication=no"
+  if [ -f "$3" ]; then
+    args[${#args[@]}]="-i";
+    args[${#args[@]}]="$3";
+  fi
+  for opt in "${opts[@]}"; do
+    args[${#args[@]}]="${opt}"
+  done
+  args[${#args[@]}]="-l"
+  args[${#args[@]}]="$2"
+  args[${#args[@]}]="$1"
+  ! ${SSH} "${args[@]}" 2> /dev/null # Invert answers question of the function.
 }
 
 # -----------------------
@@ -616,7 +622,7 @@ function tableformat {
   margin=$(get MARGIN 5)
   width=$(get WIDTH $(get COLUMNS 80))
   width=$(($width-$margin-$margin-1))
-  rowspacing="$(repeat $(get ROWSPACING 0) $'\n')"
+  rowspacing="$(repeat $(get ROWSPACING 0) $'\n ')"
   sep=$(get SEPARATOR '|')
   mode=$(get OUTPUT_MODE utf8)
 
