@@ -12,11 +12,9 @@ declare -r USER_COMMANDS="init init7 init8 servers addserver modserver delserver
 declare -r SERVER_COMMANDS="ping init_vhost keyexchange_remote apache2_init mysql_scan"
 declare -r DEPS="dd od tee cat ssh awk grep sed wget git tbl groff tr"
 declare -r TEMPDIR="$(mktemp -d /tmp/ddo.XXXXXXXXXX)"
+[ -n "$USERNAME" ] && declare -r user="$USERNAME"
+[ -z "${user}" -a -n "$USER" ] && declare -r user="$USER"
 trap 'rm -rf "$TEMPDIR"' EXIT INT TERM HUP
-
-declare user
-[ -n "$USERNAME" ] && user="$USERNAME"
-[ -n "$USER" ] && user="$USER"
 
 #------------------------------------------------------------------------------
 # Utilities
