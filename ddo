@@ -2240,7 +2240,7 @@ function radinit {
       [ "${selected_value}" = "${field}" ] && break
       n=$((n+1))
     done
-    if [ ${#multiprompt_fields:?[@]} = ${n} ]; then
+    if [ ${#multiprompt_fields[@]} = ${n} ]; then
       # There was no valid $selected_value so pick "1" and configure for it.
       n=0
       export selected_value="${multiprompt_fields:?[$n]}"
