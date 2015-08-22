@@ -5,16 +5,43 @@
 # TODO: developer documentation: command and preflight function patterns.
 
 declare -r SCRIPTHOME="$HOME/.ddo"
-declare -r SCRIPTPATH=$0
-declare -r PROGRAM=$(basename ${0})
-declare -r TTY="$(tty)"
+declare -r SCRIPTPATH="$0"
 declare -r USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
 declare -r SERVER_COMMANDS="ping init_vhost keyexchange_remote apache2_init mysql_scan"
 declare -r DEPS="dd od tee cat ssh awk grep sed wget git tbl groff tr"
-declare -r TEMPDIR="$(mktemp -d /tmp/ddo.XXXXXXXXXX)"
+
+# $PROGRAM
+program="$(basename "$0")"
+if ! [ $? ]; then
+  echo "Could not get program base name, cannot work without it. Exiting."
+  exit 255
+fi
+declare -r PROGRAM="${program}"
+unset program
+
+# $TTY
+_tty="$(tty)"
+if ! [ $? ]; then
+  echo "Could not get TTY, cannot work without it. Exiting."
+  exit 255
+fi
+declare -r TTY="${_tty}"
+unset _tty
+
+# $TMPDIR
+tmpdir="$(mktemp -d /tmp/ddo.XXXXXXXXXX)"
+if [ $? ]; then
+  trap 'rm -rf "$TEMPDIR"' EXIT INT TERM HUP
+else
+  echo "Could not make temp directory, cannot work without it. Exiting."
+  exit 255
+fi
+declare -r TEMPDIR="${tmpdir}"
+unset tmpdir
+
+# $user
 [ -n "$USERNAME" ] && declare -r user="$USERNAME"
-[ -z "${user}" -a -n "$USER" ] && declare -r user="$USER"
-trap 'rm -rf "$TEMPDIR"' EXIT INT TERM HUP
+[ -z "${user}" ] && [ -n "$USER" ] && declare -r user="$USER"
 
 #------------------------------------------------------------------------------
 # Utilities
@@ -1451,7 +1478,9 @@ function cboxdisplay {
 #
 function multiprompt {
 
-  local pmsg="$(get PROMPT 'Choose item or [ENTER] to confirm')"
+  local predicate testfield testvalue displayfn label promptmsg promptresult
+  local display field label promptfn promptmsg savedgroup i j n table
+  local -r pmsg="$(get PROMPT 'Choose item or [ENTER] to confirm')"
   local multiprompt_promptfns=( "${multiprompt_promptfns[@]}" )
   local multiprompt_displayfns=( "${multiprompt_displayfns[@]}" )
   local multiprompt_defaults=( "${multiprompt_defaults[@]}" )
@@ -1461,7 +1490,13 @@ function multiprompt {
   local multiprompt_visibility=( "${multiprompt_visibility[@]}" )
   local -a multiprompt_groups
   local -a multiprompt_predicates
-  valid_number 1 64 $2 && local -r num_columns=$2 || local -r num_columns=3
+  local -a selectmap
+
+  if valid_number 1 32 "$2"; then
+    local -r num_columns=$2
+  else
+    local -r num_columns=3
+  fi
 
   read_arrays \
     multiprompt_promptfns \
@@ -1473,7 +1508,7 @@ function multiprompt {
     multiprompt_visibility
 
   for i in "${!multiprompt_fields[@]}"; do
-    local field="${multiprompt_fields[$i]}"
+    field="${multiprompt_fields[$i]}"
     multiprompt_groups[$i]="$(sed "s/[[:space:]]*\\([^\\[[:space:]]*\\)[^$]*$/\\1/g" <<< "${multiprompt_visibility[$i]}")"
     multiprompt_predicates[$i]="$(sed 's/\][[:space:]]*\[/|/g; s/[[:space:]]*\[/\[/g' <<< "${multiprompt_visibility[$i]}")"
     if [ -z "${!field}" ]; then # Value not already set.
@@ -1500,27 +1535,26 @@ function multiprompt {
   [ -n "${INIT}" ] && ${INIT}
 
   while : ; do
-    local n=1
-    local table=""
-    local -a selectmap
+    n=1
+    table=""
     for i in "${!multiprompt_fields[@]}"; do
-      local field="${multiprompt_fields[$i]}"
+      field="${multiprompt_fields[$i]}"
       [ "${multiprompt_groups[$i]}" != "${GROUP}" ] && continue
-      local j=2
+      j=2
       while : ; do
-        local predicate="$(awk -F"[\\\\]|\\\\[|\\\\|]+" "{print \$${j}}" <<< "${multiprompt_predicates[$i]}")"
+        predicate="$(awk -F"[\\\\]|\\\\[|\\\\|]+" "{print \$${j}}" <<< "${multiprompt_predicates[$i]}")"
         [ -z "${predicate}" ] && break
-        local testfield="$(sed 's/[[:space:]]*\([^\=[:space:]]*\)\=[^$]*/\1/g' <<< ${predicate})"
-        local testvalue="$(sed 's/[^\=]*\=\([^$]*\)/\1/g' <<< ${predicate})"
+        testfield="$(sed 's/[[:space:]]*\([^\=[:space:]]*\)\=[^$]*/\1/g' <<< "${predicate}")"
+        testvalue="$(sed 's/[^\=]*\=\([^$]*\)/\1/g' <<< "${predicate}")"
         [ "${!testfield}" != "${testvalue}" ] && continue 2
         j=$((j+1))
       done
-      local displayfn="${multiprompt_displayfns[$i]}"
-      local label="${multiprompt_labels[$i]}"
-      local promptmsg="${multiprompt_promptmsgs[$i]}"
-      local display="$(${displayfn} ${field} "${label}" "${promptmsg}")"
-      table+="|`printf \"%3s %s\" \"${n}.\" \"${display}\"`"
-      [ $(($n % ${num_columns})) = 0 ] && table+=$'\n'
+      displayfn="${multiprompt_displayfns[$i]}"
+      label="${multiprompt_labels[$i]}"
+      promptmsg="${multiprompt_promptmsgs[$i]}"
+      display="$(${displayfn} "${field}" "${label}" "${promptmsg}")"
+      table+="|$(printf '%3s %s' "${n}." "${display}")"
+      [ $((n % num_columns)) = 0 ] && table+=$'\n'
       selectmap[$n]="$i"
       n=$((n+1))
     done
@@ -1536,18 +1570,18 @@ function multiprompt {
            "displayed items or press [ENTER] to confirm."
       continue
     fi
-    local field="${multiprompt_fields[$selected]}"
-    local label="${multiprompt_labels[$selected]}"
-    local promptfn="${multiprompt_promptfns[$selected]}"
-    local promptmsg="${multiprompt_promptmsgs[$selected]}"
-    local savedgroup="${GROUP}" # Stash the group, promptfn might change it.
+    field="${multiprompt_fields[$selected]}"
+    label="${multiprompt_labels[$selected]}"
+    promptfn="${multiprompt_promptfns[$selected]}"
+    promptmsg="${multiprompt_promptmsgs[$selected]}"
+    savedgroup="${GROUP}" # Stash the group, promptfn might change it.
     ${promptfn} "${field}" "${promptmsg}" "${label}"
-    local promptresult=$?
+    promptresult=$?
     GROUP="${savedgroup}"
     [ ${promptresult} = 0 ] || return ${promptresult}
   done
-  fields=${multiprompt_fields[@]}
-  labels=${multiprompt_labels[@]}
+  export fields=( "${multiprompt_fields[@]}" )
+  export labels=( "${multiprompt_labels[@]}" )
 }
 # Hack, can't export globals so have to declare here and unset before using.
 declare -a fields
@@ -1599,6 +1633,7 @@ declare -a labels
 function recordsprompt {
 
   # Local vars.
+  local keys
   local -r recordsfield="$1"
   local -r recordslabel="$2"
   local -r recorddisplayfn="$3"
@@ -1608,16 +1643,11 @@ function recordsprompt {
   local -r prompt="$(get PROMPT 'Choose a record to edit or press [ENTER] to confirm')"
   local -r title="$(get TITLE "Choose ${recordslabel} to edit or press [ENTER] to confirm")"
 
+  # Parse the config.
   if [ -z "$recordsprompt_fields" ]; then
-
-    local -a recordsprompt_promptfns
-    local -a recordsprompt_displayfns
-    local -a recordsprompt_defaults
-    local -a recordsprompt_fields
-    local -a recordsprompt_labels
     local -a recordsprompt_promptmsgs
-
-    # Parse the config.
+    local -a recordsprompt_displayfns recordsprompt_defaults recordsprompt_fields
+    local -a recordsprompt_promptfns recordsprompt_labels
     read_arrays \
       recordsprompt_promptfns \
       recordsprompt_displayfns \
@@ -1630,7 +1660,7 @@ function recordsprompt {
   # Loop. If multiprompt returns with 1 we regenerate the menu.
   while : ; do
 
-    local keys="$(recordskeys ${recordsfield})"
+    keys="$(recordskeys "${recordsfield}")"
     local multiprompt_fields=( )
     local multiprompt_defaults=( )
     local multiprompt_labels=( )
@@ -1646,17 +1676,17 @@ function recordsprompt {
       multiprompt_defaults[${#multiprompt_defaults[@]}]=""
       multiprompt_fields[${#multiprompt_fields[@]}]="${recordsfield}"
       multiprompt_labels[${#multiprompt_labels[@]}]="${k}"
-      multiprompt_promptmsgs[${#multiprompt_promptmsgs[@]}]="${recordsprompt_fields[@]}"
+      multiprompt_promptmsgs[${#multiprompt_promptmsgs[@]}]="${recordsprompt_fields[*]}"
       multiprompt_visibility[${#multiprompt_visibility[@]}]=""
     done
 
     # multiprompt config: edit individual records
-    for i in ${!recordsprompt_promptfns[@]}; do
+    for i in "${!recordsprompt_fields[@]}"; do
       for k in ${keys}; do
         multiprompt_promptfns[${#multiprompt_promptfns[@]}]="${recordsprompt_promptfns[$i]}"
         multiprompt_displayfns[${#multiprompt_displayfns[@]}]="${recordsprompt_displayfns[$i]}"
         multiprompt_defaults[${#multiprompt_defaults[@]}]="${recordsprompt_defaults[$i]}"
-        multiprompt_fields[${#multiprompt_fields[@]}]="$(ns ${recordsfield} _ ${k} _ ${recordsprompt_fields[$i]})"
+        multiprompt_fields[${#multiprompt_fields[@]}]="$(ns "${recordsfield}" _ "${k}" _ "${recordsprompt_fields[$i]}")"
         multiprompt_labels[${#multiprompt_labels[@]}]="${recordsprompt_labels[$i]}"
         multiprompt_promptmsgs[${#multiprompt_promptmsgs[@]}]="${recordsprompt_promptmsgs[$i]}"
         multiprompt_visibility[${#multiprompt_visibility[@]}]="${k}"
@@ -1669,7 +1699,7 @@ function recordsprompt {
       multiprompt_displayfns[${#multiprompt_displayfns[@]}]="recordsprompt_addfn_display"
       multiprompt_defaults[${#multiprompt_defaults[@]}]=""
       multiprompt_fields[${#multiprompt_fields[@]}]="${recordsfield}"
-      multiprompt_labels[${#multiprompt_labels[@]}]="${multiprompt_fields[@]}"
+      multiprompt_labels[${#multiprompt_labels[@]}]="${multiprompt_fields[*]}"
       multiprompt_promptmsgs[${#multiprompt_promptmsgs[@]}]="${keys}"
       multiprompt_visibility[${#multiprompt_visibility[@]}]=""
     fi
@@ -1681,7 +1711,7 @@ function recordsprompt {
         multiprompt_displayfns[${#multiprompt_displayfns[@]}]="recordsprompt_delfn_display"
         multiprompt_defaults[${#multiprompt_defaults[@]}]=""
         multiprompt_fields[${#multiprompt_fields[@]}]="${recordsfield}"
-        multiprompt_labels[${#multiprompt_labels[@]}]="${multiprompt_fields[@]}"
+        multiprompt_labels[${#multiprompt_labels[@]}]="${multiprompt_fields[*]}"
         multiprompt_promptmsgs[${#multiprompt_promptmsgs[@]}]="${k}"
         multiprompt_visibility[${#multiprompt_visibility[@]}]="${k}"
       done
@@ -1703,9 +1733,9 @@ function recordsprompt_addfn {
   local -r records="$1"
   local -r nextkey="$2"
   local -r fields=( $3 )
-  for i in ${!fields[@]}; do
+  for i in "${!fields[@]}"; do
     field="${records}_${nextkey}_${fields[$i]}"
-    value="${recordsprompt_defaults[$i]}"
+    value="${recordsprompt_defaults:?[$i]}"
     export ${field}="${value}"
   done
 }
@@ -1717,15 +1747,16 @@ function recordsprompt_addfn {
 # TODO: Delete currently seems broken.
 #
 function recordsprompt_delfn {
+  local v
   local -r records="$1"
   local -r key="$2"
   local -r fields=( $3 )
-  local -r display="$(${recorddisplayfn} "${records}" "${key}" "$3")"
-  ynprompt v "Really delete ${recordslabel} \"${display}\"?"
+  local -r display="$(${recorddisplayfn:?} "${records}" "${key}" "$3")"
+  ynprompt v "Really delete ${recordslabel:?} \"${display}\"?"
   if [ "${v}" = "y" ]; then
-    for i in ${!fields[@]}; do
+    for i in "${!fields[@]}"; do
       field="${records}_${key}_${fields[$i]}"
-      unset ${field}
+      unset "${field}"
     done
   fi
 }
@@ -1747,10 +1778,10 @@ function recordskeys {
 #
 function recordsnextkey {
   local n=0
-  for k in $(recordskeys $1); do
-    valid_number 0 99999999 "$k" && n=$(($k>=$n?$k+1:$n))
+  for k in $(recordskeys "$1"); do
+    valid_number 0 99999999 "$k" && n=$((k>=n?k+1:n))
   done
-  return $n
+  return ${n}
 }
 
 # ------------------------------
@@ -1843,15 +1874,14 @@ function recordsnextkey {
 function argsprompt {
 
   # Variables init.
-  local exitearly=$(get EARLYEXIT $(get FORCE_YES, 0))
-  local title="$1"; shift
-  local num_columns="$1"; shift
-  local promptfn=$(get PROMPTFN textprompt)
-  local displayfn=$(get DISPLAYFN display)
-  local pfn
-  local dfn
+  local -r exitearly="$(get EARLYEXIT "$(get FORCE_YES 0)")"
+  local -r title="$1"; shift
+  local -r num_columns="$1"; shift
+  local -r promptfn=$(get PROMPTFN textprompt)
+  local -r displayfn=$(get DISPLAYFN display)
+  local i v pfn dfn dflt field defaultpfn handled hasrequired
 
-  if [ -z "$multiprompt_fields" ]; then
+  if [ -z "${multiprompt_fields[*]}" ]; then
 
     local multiprompt_fields=( )
     local multiprompt_defaults=( )
@@ -1879,17 +1909,23 @@ function argsprompt {
       multiprompt_displayfns
 
     for i in "${!multiprompt_fields[@]}"; do
-      local dflt="${multiprompt_defaults[$i]}"
-      local field="${multiprompt_fields[$i]}"
-      [ "${dflt}" = "=GROUP" ] &&
-        local defaultpfn="" ||
-        local defaultpfn="${promptfn}"
-      [ -n "${multiprompt_promptfns[$i]}" ] &&
-          pfn="${multiprompt_promptfns[$i]}" ||
+      dflt="${multiprompt_defaults[$i]}"
+      field="${multiprompt_fields[$i]}"
+      if [ "${dflt}" = "=GROUP" ]; then
+        defaultpfn=""
+      else
+        defaultpfn="${promptfn}"
+      fi
+      if [ -n "${multiprompt_promptfns[$i]}" ]; then
+          pfn="${multiprompt_promptfns[$i]}"
+      else
           pfn="${defaultpfn}"
-      [ -n "${multiprompt_displayfns[$i]}" ] &&
-        dfn="${multiprompt_displayfns[$i]}" ||
+      fi
+      if [ -n "${multiprompt_displayfns[$i]}" ]; then
+        dfn="${multiprompt_displayfns[$i]}"
+      else
         dfn="${displayfn}"
+      fi
       case "${dflt}" in
         "=PROMPT"|"=REQUIRED")
           argsprompt_required["${#argsprompt_required[@]}"]="${field}"
@@ -1898,51 +1934,51 @@ function argsprompt {
           [ -z "${!field}" ] && export ${multiprompt_fields[$i]}="${dflt}"
         ;;
       esac
-      multiprompt_defaults[$i]="${dflt}"
-      multiprompt_promptfns[$i]="${pfn}"
-      multiprompt_displayfns[$i]="${dfn}"
+      multiprompt_defaults[${i}]="${dflt}"
+      multiprompt_promptfns[${i}]="${pfn}"
+      multiprompt_displayfns[${i}]="${dfn}"
     done
 
     # Parse arguments.
     while : ; do
       [ -z "$1" ] && break
-      local i=0
-      local handled=0
+      i=0
+      handled=0
       while : ; do
         case "$1" in
           "${argsprompt_longopts[$i]}")
-            export ${multiprompt_fields[$i]}=$2
+            export ${multiprompt_fields[$i]}="$2"
             shift; shift
             handled=1
           ;;
           "${argsprompt_shortopts[$i]}")
-            export ${multiprompt_fields[$i]}=$2
+            export ${multiprompt_fields[$i]}="$2"
             shift; shift
             handled=2
           ;;
           ${argsprompt_longopts[$i]}=*)
-            local v="$(sed "s/${argsprompt_longopts[$i]}=//g" <<< "$1")"
+            v="$(sed "s/${argsprompt_longopts[$i]}=//g" <<< "$1")"
             export ${multiprompt_fields[$i]}="${v}"
             shift
             handled=3
           ;;
           ${argsprompt_shortopts[$i]}=*)
-            local v="$(sed "s/${argsprompt_shortopts[$i]}=//g" <<< "$1")"
+            v="$(sed "s/${argsprompt_shortopts[$i]}=//g" <<< "$1")"
             export ${multiprompt_fields[$i]}="${v}"
             shift
             handled=4
           ;;
         esac
         i=$((i+1))
-        [ $handled != 0 ] && break
+        [ "${handled}" != 0 ] && break
         [ "$i" -ge "${#multiprompt_fields[@]}" ] && break
       done
-      [ $handled = 0 ] && fatal "bad arg: '$1'" # TODO better error handling
+      [ "${handled}" = 0 ] && fatal "bad arg: '$1'" # TODO better error handling
     done
 
     # Check if we have all argsprompt_required fields.
-    if [ $exitearly != 0 ]; then
-      local hasrequired=1
+    if [ "${exitearly}" != 0 ]; then
+      hasrequired=1
       for field in "${argsprompt_required[@]}"; do
         if [ -n "${!field}" ]; then
           # Required field has a value, keep checking.
@@ -1954,7 +1990,7 @@ function argsprompt {
         fi
       done
       # Early exit if all argsprompt_required fields supplied and requested.
-      [ $hasrequired = 1 ] && return 0
+      [ "${hasrequired}" = 1 ] && return 0
     fi
   fi
 
