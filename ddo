@@ -120,6 +120,7 @@ function repeat {
 function loadserver {
   file="$SCRIPTHOME/servers/$1.server"
   [ -f "$file" ] || return 1
+  # shellcheck disable=SC1090
   . "$file" || return 1
   local n
   n=$(ns "$1" _alias); declare -x "${n}=${!n}"
@@ -210,21 +211,32 @@ function ssh_pw_required {
 #   sshcmd mysite.com fletch ping # Prints `uname -a` from the server.
 #
 function sshcmd {
+  local script
   local -r sshcmd_host=$1; shift
   local -r sshcmd_user=$1; shift
   local -r sshcmd_identity=$(get IDENTITY_FILE)
-  local sshcmd_options=$(get SSH_OPTIONS)
-  [ -f "${sshcmd_identity}" ] && sshcmd_options+=" -i ${sshcmd_identity}"
-  [ -n "${sshcmd_user}" ] && sshcmd_options+=" -l ${sshcmd_user}"
-  sshcmd_options+=" ${sshcmd_host}"
-  local script="arguments=( $(printf " %q" "$@") )"$'\n'
-  script+="$(cat "$SCRIPTPATH")"$'\n'
+  local sshcmd_options=( $(get SSH_OPTIONS) )
+  local -a args
+  if [ -f "${sshcmd_identity}" ]; then
+    args[${#args[@]}]="-i"
+    args[${#args[@]}]="${sshcmd_identity}";
+  fi
+  for opt in "${sshcmd_options[@]}"; do
+    args[${#args[@]}]="${opt}"
+  done
+  if [ -f "${sshcmd_user}" ]; then
+    args[${#args[@]}]="-l"
+    args[${#args[@]}]="${sshcmd_user}";
+  fi
+  args[${#args[@]}]="${sshcmd_host}"
   # So far this rather clumsy method of passing the entire script as the
   # command string is the only way to achieve copying this file to the server
   # and running it in a single shot. Attempts to do it using stdin break
   # SSH's pty and then prompting functions and sudo fail to work on remote.
   # Still looking for a nicer way to achieve it.
-  ${SSH} -Ctt ${sshcmd_options} "${script}" 2>&1 | grep -v "^Connection to .* closed\..*$"
+  script="arguments=( $(printf " %q" "$@") )"$'\n'
+  script+="$(cat "$SCRIPTPATH")"$'\n'
+  ${SSH} -Ctt "${args[@]}" "${script}" 2>&1 | grep -v "^Connection to .* closed\..*$"
 }
 
 # -------------------
@@ -257,10 +269,10 @@ function sshcmd {
 function remote {
   local -r remote_server="$1"; shift
   loadserver "${remote_server}" || return 255
-  local -r remote_identity="$(get $(ns ${remote_server} _identity))"
-  local -r remote_options="$(get $(ns ${remote_server} _sshopts))"
-  local -r remote_user="$(get $(ns ${remote_server} _user))"
-  local -r remote_host="$(get $(ns ${remote_server} _host))"
+  local -r remote_identity="$(get "$(ns "${remote_server}" _identity)")"
+  local -r remote_options="$(get "$(ns "${remote_server}" _sshopts)")"
+  local -r remote_user="$(get "$(ns "${remote_server}" _user)")"
+  local -r remote_host="$(get "$(ns "${remote_server}" _host)")"
   IDENTITY_FILE="${remote_identity}" SSH_OPTIONS="${remote_options}" \
     sshcmd "${remote_host}" "${remote_user}" --remote "$@"
 }
@@ -293,12 +305,12 @@ function remote {
 #   echo ENV: $ENV
 #
 function prog {
-  cmd="$(command -v $2)"
-  [ ! -f "$cmd" ] && cmd="$(which $2 2> /dev/null)" # $(command) doesn't work when alias.
-  [ ! -f "$cmd" ] && return -1 # $(command) and $(which) failed, bail.
+  cmd="$(command -v "$2")"
+  [ ! -f "$cmd" ] && cmd="$(which "$2" 2> /dev/null)" # $(command) doesn't work when alias.
+  [ ! -f "$cmd" ] && return 255 # $(command) and $(which) failed, bail.
   [ -x "$cmd" ]
   rval=$?
-  [ $rval ] && export $1="$(command -v $2)"
+  [ $rval ] && export $1="$(command -v "$2")"
   return $rval
 }
 
@@ -327,7 +339,6 @@ function prog {
 #   fi
 #
 function func {
-#  [ "$(type -t $1)" = "function" ]
   local -f $1 > /dev/null
   return $?
 }
@@ -415,10 +426,8 @@ function valid_command {
 function valid_number {
   [ -n "$3" ] &&
   [[ "$3" =~ ^[0-9]+$ ]] &&
-  [ $3 -ge $1 ] &&
-  [ $3 -lt $2 ] &&
-    return 0 ||
-    return 1
+  [ "$3" -ge "$1" ] &&
+  [ "$3" -lt "$2" ] && return 0 || return 1
 }
 
 # TODO documentation.
@@ -474,16 +483,16 @@ function read_arrays {
   mapfile -t orig < <(grep -vE '^[\s]*#|^[\s]*$' | sed "s/#[^$]*$//g; s/^[[:space:]]*//g; s/[[:space:]]*$//g; s/[[:space:]]*${sep}[[:space:]]*/${sep}/g")
   [ ${#orig[@]} = 0 ] && return
   for line in "${orig[@]}"; do
-    [ -n "$PREPROCESS" ] && line=`$PREPROCESS "${line}"`
+    [ -n "$PREPROCESS" ] && line=$(${PREPROCESS} "${line}")
     [ -n "$PREFIX" ] && line="$PREFIX ${line}"
-    [ -n "$PREPROCESS" -o -n "$PREFIX" ] &&
+    [ -n "$PREPROCESS" ] || [ -n "$PREFIX" ] &&
       line="$(sed "s/#[^$]*$//g; s/^[[:space:]]*//g; s/[[:space:]]*$//g; s/[[:space:]]*${sep}[[:space:]]*/${sep}/g" <<< "${line}")"
     [ -n "${source}" ] && source+=$'\n'
     source+="${line}"
   done
   [ -z "${source}" ] && return
   for i in $(seq 1 $#); do
-    mapfile -t $1 < <(awk -F "${sep}" "{print \$${i}}" <<< "${source}")
+    mapfile -t "$1" < <(awk -F "${sep}" "{print \$${i}}" <<< "${source}")
     shift
   done
 }
@@ -618,15 +627,16 @@ function tableformat {
   # Variables init.
   ncolumns=0
   unset body
-  tab="`echo -e "\t"`"
+  tab="$(echo -e "\t")"
   margin=$(get MARGIN 5)
-  width=$(get WIDTH $(get COLUMNS 80))
-  width=$(($width-$margin-$margin-1))
-  rowspacing="$(repeat $(get ROWSPACING 0) $'\n ')"
+  width=$(get WIDTH "$(get COLUMNS 80)")
+  width=$((width-margin-margin-1))
+  rowspacing="$(repeat "$(get ROWSPACING 0)" $'\n ')"
   sep=$(get SEPARATOR '|')
   mode=$(get OUTPUT_MODE utf8)
 
   # Read records from stdin. Count columns.
+  # shellcheck disable=SC2162
   while IFS="$sep" read -a a; do
     [ ${#a[@]} = 0 ] && continue
     i=0
@@ -641,7 +651,7 @@ function tableformat {
         body+=$'T{\n'"${v}${rowspacing}"$'\nT}'
     done
     body+=$'\n'
-    ncolumns=$(($i>$ncolumns?$i:$ncolumns))
+    ncolumns=$((i>ncolumns?i:ncolumns))
   done
 
   # Format strings.
