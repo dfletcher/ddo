@@ -2091,7 +2091,7 @@ function checkboxprompt {
   PREPROCESS="cboxpreprocess" PROMPT="$promptmsg" GROUP="" multiprompt "$1" "$2"
   unset unchecked
   unset checked
-  for f in "${multiprompt_fields[@]}"; do
+  for f in "${multiprompt_fields:?[@]}"; do
     [ "${!f}" = "y" ] && checked+="$f " || unchecked+="$f "
   done
   export checked
@@ -2197,7 +2197,11 @@ function cboxpreprocess {
 # See STDIN above for column definitions.
 #
 function radioprompt {
-  [ -z "$3" ] && local -r num_columns=3 || local -r num_columns="$3"
+  if [ -z "$3" ]; then
+    local -r num_columns=3
+  else
+    local -r num_columns="$3"
+  fi
   local -r msg="$(get PROMPT "Toggle items or press [ENTER] to confirm")"
   export selected_value="$1"
   export selected_index=""
@@ -2231,16 +2235,16 @@ function radinit {
   # Figure out the $selected_index using the $selected_value and fields array.
   if [ -z "${selected_index}" ]; then
     n=0
-    for field in "${multiprompt_fields[@]}"; do
+    for field in "${multiprompt_fields:?[@]}"; do
       # If field value equals selected value, we found the $selected_index ($n).
       [ "${selected_value}" = "${field}" ] && break
       n=$((n+1))
     done
-    if [ ${#multiprompt_fields[@]} = ${n} ]; then
+    if [ ${#multiprompt_fields:?[@]} = ${n} ]; then
       # There was no valid $selected_value so pick "1" and configure for it.
       n=0
-      export selected_value="${multiprompt_fields[$n]}"
-      export selected_label="${multiprompt_labels[$n]}"
+      export selected_value="${multiprompt_fields:?[$n]}"
+      export selected_label="${multiprompt_labels:?[$n]}"
     fi
     export selected_index="$n"
   fi
