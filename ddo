@@ -122,15 +122,10 @@ function loadserver {
   [ -f "$file" ] || return 1
   # shellcheck disable=SC1090
   . "$file" || return 1
-  local n
-  n=$(ns "$1" _alias); declare -x "${n}=${!n}"
-  n=$(ns "$1" _host); declare -x "${n}=${!n}"
-  n=$(ns "$1" _user); declare -x "${n}=${!n}"
-  n=$(ns "$1" _identity); declare -x "${n}=${!n}"
-  n=$(ns "$1" _options); declare -x "${n}=${!n}"
   # TODO test required values and check alias against $1
   return 0
 }
+
 
 # -------------------------------------------------------
 # ssh_pw_required(host, user, identity_file, ssh_options)
@@ -728,9 +723,11 @@ function paragraph {
 #    usage; exit 0
 #
 function usage {
-  unset helpdata
-  for cmd in $COMMANDS; do
-    helpdata+="$cmd|$($(ns $cmd _shorthelp))"$'\n'
+  local helpdata fshorthelp shorthelp
+  for cmd in ${COMMANDS}; do
+    fshorthelp="$(ns "${cmd}" _shorthelp)"
+    func "${fshorthelp}" && shorthelp="$(${fshorthelp})" || shorthelp=""
+    helpdata+="${cmd}|${shorthelp}"$'\n'
   done
   echo -e "Usage: $PROGRAM [GLOBAL ARGUMENTS] COMMAND (COMMAND ARGUMENTS) [-- COMMAND (COMMAND ARGUMENTS)]...\n"
   FORMAT="llx" MARGIN="3" tableformat <<EOF
@@ -772,9 +769,9 @@ EOF
 #    fatal "Something went wrong! (details ...)"
 #
 function fatal {
-  exitcode=$(get EXITCODE 1)
+  local -r exitcode=$(get EXITCODE 1)
   echo -e "$*" | MARGIN="0" paragraph > /dev/stderr
-  exit $exitcode
+  exit "${exitcode}"
 }
 
 # ------------------------
@@ -805,11 +802,14 @@ function fatal {
 #
 function longhelp {
 
-  command="$1"
+  local -r command="$1"
   shift
+  local -r fshorthelp="$(ns "${command}" _shorthelp)"
+  local shorthelp
+  func "${fshorthelp}" && shorthelp="$(${fshorthelp})" || shorthelp=""
 
   while [ -n "$1" ]; do
-    echo "$1" | sed 's/^/   /'
+    paragraph <<< "$1"
     shift
   done
 
@@ -817,8 +817,8 @@ function longhelp {
   FORMAT="lw8lx" HEADER_FORMAT="lb" tableformat <<EOF
     Synopsis
     _
-    Command: | $command
-    Summary: | $($(ns $command _shorthelp))
+    Command: | ${command}
+    Summary: | ${shorthelp}
 EOF
 
   echo
@@ -827,30 +827,34 @@ EOF
   FORMAT="lx" HEADER_FORMAT="lb" tableformat <<EOF
     Details
     _
-    `cat`
+    $(cat)
 EOF
 
 }
 
 # TODO docs!
-# argshelp(command, usage)
+# argshelp(command, configvar, usage)
 function argshelp {
-  local -r configvar="$1"
-  local -r config=
-  shift
-  local helplines=""
 
+  local -r command="$1"; shift
+  local -r configvar="$1"; shift
+  local helplines=""
   local -a argshelp_fields
+  # shellcheck disable=SC2034
   local -a argshelp_defaults
+  # shellcheck disable=SC2034
   local -a argshelp_labels
+  # shellcheck disable=SC2034
   local -a argshelp_prompts
   local -a argshelp_longopts
   local -a argshelp_shortopts
   local -a argshelp_descriptions
+  # shellcheck disable=SC2034
   local -a argshelp_visibility
+  # shellcheck disable=SC2034
   local -a argshelp_promptfns
+  # shellcheck disable=SC2034
   local -a argshelp_displayfns
-  local -a argshelp_required
 
   read_arrays \
     argshelp_fields \
@@ -896,7 +900,6 @@ EOF
 # if the access check failed.
 function preflight_sudo {
   # TODO!
-  PREFLGHT_ERROR=""
   return 1
 }
 
@@ -950,17 +953,20 @@ function prompt {
   message=$2
   shift; shift
   result=""
-  [ -n "${SILENT}" ] && silent="-s" || silent=""
-  [ -n "${DEFAULT}" ] && default="-i${DEFAULT}" || default=""
+  local -a args
+  [ -n "${SILENT}" ] && args[${#args[@]}]="-s"
+  [ -n "${DEFAULT}" ] && args[${#args[@]}]="-i${DEFAULT}"
   if [ -n "$*" ]; then
     while [[ ! "$@" =~ (^| )"$result"($| ) ]]; do
-      read ${silent} ${default} -ep "$message: " result < ${TTY} >> ${TTY}
+      # shellcheck disable=SC2094
+      read -r "${args[@]}" -ep "$message: " result < "${TTY}" >> "${TTY}"
     done
   else
-    read ${silent} ${default} -ep "$message: " result < ${TTY} >> ${TTY}
+    # shellcheck disable=SC2094
+    read -r "${args[@]}" -ep "$message: " result < "${TTY}" >> "${TTY}"
   fi
   [ -n "${SILENT}" ] && echo
-  export $resultvar="$result"
+  export ${resultvar}="${result}"
 }
 
 # ------------------------------------------
@@ -974,10 +980,13 @@ function prompt {
 # SEE ALSO: multiprompt for promptfn details.
 #
 function ynprompt {
+  local ynresult
   echo
-  [ -n "$3" ] &&
-    DEFAULT="$3" prompt ynresult "$2 (y/n)" "y" "n" ||
+  if [ -n "$3" ]; then
+    DEFAULT="$3" prompt ynresult "$2 (y/n)" "y" "n"
+  else
     prompt ynresult "$2 (y/n)" "y" "n"
+  fi
   export $1=$ynresult
   [ "${ynresult}" = "y" ]
 }
@@ -1011,6 +1020,7 @@ function textprompt {
 # SEE ALSO: multiprompt for promptfn details.
 #
 function pwprompt {
+  local prompt1 prompt2
   echo
   while : ; do
     SILENT="1" prompt prompt1 "$2"
@@ -1033,17 +1043,18 @@ function pwprompt {
 # SEE ALSO: multiprompt for promptfn details.
 #
 function serverprompt {
+  declare selected_value
+  local f n server host
   local -r serverprompt_field="$1"
-  local f
   local config=""
   local -a serverprompt_servers
   local -a serverprompt_server_files
   mapfile serverprompt_server_files < <(ls "$SCRIPTHOME/servers/"*.server) 
   for f in "${serverprompt_server_files[@]}"; do
-    local n="$(basename "${f}")"
-    local server="$(sed 's/\.server//g' <<< "${n}")"
+    n="$(basename "${f}")"
+    server="$(sed 's/\.server//g' <<< "${n}")"
     loadserver "${server}"
-    local host="$(get $(ns "${server}" _host))"
+    host="$(get "$(ns "${server}" _host)")"
     config+="${server}|${server}: ${host}"$'\n'
     serverprompt_servers[${#serverprompt_servers[@]}]="${server}"
   done
@@ -1126,7 +1137,11 @@ function filenewprompt {
 #
 function cboxprompt {
   # Don't bother with input, just toggle the state.
-  [ "${!1}" = "y" ] && export $1=n || export $1=y
+  if [ "${!1}" = "y" ]; then
+    export $1=n
+  else
+    export $1=y
+  fi
 }
 
 # -------------------------------------------
@@ -1141,9 +1156,11 @@ function cboxprompt {
 #
 function radprompt {
   # Don't bother with input, just toggle the state.
-  export selected_index="$((${i}-1))" # $i = selected index
-  export selected_value="$1" # $1 = field name
-  export selected_label="${multiprompt_labels[${selected_index}]}"
+  # TODO: shouldn't "i" be "selected" here ("selected" should be the normalized
+  # version of i)? Seems to work as-is, using "selected" instead causes issues.
+  export selected_index="$((${i:?}-1))"
+  export selected_value="$1"
+  export selected_label="${multiprompt_labels:?[${selected_index}]}"
 }
 
 # ------------------------------------------------------------
@@ -1157,8 +1174,9 @@ function radprompt {
 # SEE ALSO: multiprompt for promptfn details.
 #
 function recordsprompt_group_prompt {
-  GROUP="$3" PROMPT="${recordprompt}" recordsprompt \
-    "${recordsfield}" "${recordslabel}" "${recorddisplayfn}" "${addfn}" "${delfn}"
+  GROUP="$3" PROMPT="${recordprompt:?}" recordsprompt \
+    "${recordsfield:?}" "${recordslabel:?}" \
+    "${recorddisplayfn:?}" "${addfn:?}" "${delfn:?}"
 }
 
 # ------------------------------------------------------------
@@ -1172,10 +1190,9 @@ function recordsprompt_group_prompt {
 # SEE ALSO: multiprompt for promptfn details.
 #
 function recordsprompt_addfn_prompt {
-  local -r records="$1"
-  recordsnextkey ${records}
+  recordsnextkey "$1"
   local -r nextkey=$?
-  ${addfn} "${records}" "${nextkey}" "$3"
+  ${addfn:?} "$1" "${nextkey}" "$3"
   return 1
 }
 
@@ -1190,7 +1207,7 @@ function recordsprompt_addfn_prompt {
 # SEE ALSO: multiprompt for promptfn details.
 #
 function recordsprompt_delfn_prompt {
-  ${delfn} "$1" "$2" "$3"
+  ${delfn:?} "$1" "$2" "$3"
   return 2
 }
 
@@ -1205,7 +1222,7 @@ function recordsprompt_delfn_prompt {
 # SEE ALSO: multiprompt for promptfn details.
 #
 function multiprompt_group_prompt {
-  GROUP="$1" PROMPT="$2" multiprompt "$3" "${num_columns}" <<< ""
+  GROUP="$1" PROMPT="$2" multiprompt "$3" "${num_columns:?}" <<< ""
 }
 
 #------------------------------------------------------------------------------
@@ -1224,7 +1241,11 @@ function multiprompt_group_prompt {
 # SEE ALSO: multiprompt for displayfn details.
 #
 function display {
-  [ -n "${!1}" ] && echo "$2: ${!1}" || echo "$2"
+  if [ -n "${!1}" ]; then
+    echo "$2: ${!1}"
+  else
+    echo "$2"
+  fi
 }
 
 # -------------------------------------------------------------
@@ -1238,7 +1259,7 @@ function display {
 # SEE ALSO: multiprompt for displayfn details.
 #
 function recordsprompt_addfn_display {
-  get ADDLABEL "Add new ${recordslabel}"
+  get ADDLABEL "Add new ${recordslabel:?}"
 }
 
 # -------------------------------------------------------------
@@ -1252,7 +1273,7 @@ function recordsprompt_addfn_display {
 # SEE ALSO: multiprompt for displayfn details.
 #
 function recordsprompt_delfn_display {
-  get DELLABEL "Remove ${recordslabel}"
+  get DELLABEL "Remove ${recordslabel:?}"
 }
 
 # --------------------------------------------
@@ -1266,7 +1287,11 @@ function recordsprompt_delfn_display {
 # SEE ALSO: multiprompt for displayfn details.
 #
 function raddisplay {
-  [ "${selected_index}" = "$((${n}-1))" ] && echo "(*) $2" || echo "( ) $2"
+  if [ "${selected_index:?}" = "$((${n:?}-1))" ]; then
+    echo "(*) $2"
+  else
+    echo "( ) $2"
+  fi
 }
 
 # ---------------------------------------------
@@ -1280,7 +1305,11 @@ function raddisplay {
 # SEE ALSO: multiprompt for displayfn details.
 #
 function cboxdisplay {
-  [ "${!1}" = "y" ] && echo "[X] $2" || echo "[ ] $2"
+  if [ "${!1}" = "y" ]; then
+    echo "[X] $2"
+  else
+    echo "[ ] $2"
+  fi
 }
 
 #------------------------------------------------------------------------------
@@ -2560,7 +2589,7 @@ function addserver_shorthelp {
 }
 
 function addserver_help {
-  argshelp addserver_CONFIG "$PROGRAM $1 (ARGUMENTS)" <<EOL
+  argshelp "$1" addserver_CONFIG "$PROGRAM $1 (ARGUMENTS)" <<EOL
   TODO addserver help
 EOL
 }
@@ -2859,7 +2888,7 @@ function keyexchange_shorthelp {
 }
 
 function keyexchange_help {
-  argshelp keyexchange_CONFIG "$PROGRAM $1 (ARGUMENTS)" <<EOL
+  argshelp "$1" keyexchange_CONFIG "$PROGRAM $1 (ARGUMENTS)" <<EOL
   TODO keyexchange help
 EOL
 }
