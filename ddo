@@ -2649,7 +2649,7 @@ function addserver_command {
   # Write output file.
   for f in ${fields[@]}; do
     local name=$(sed "s/addserver/${addserver_alias}/g" <<< ${f})
-    echo "${name}=${!f}" >> "$file"
+    printf "%q=%q\n" "${name}" "${!f}" >> "$file"
   done
 
   # Add apache vhosts to file.
