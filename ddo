@@ -1085,7 +1085,7 @@ function serverprompt {
   local config=""
   local -a serverprompt_servers
   local -a serverprompt_server_files
-  mapfile serverprompt_server_files < <(ls "$SCRIPTHOME/servers/"*.server) 
+  mapfile serverprompt_server_files < <(ls "$SCRIPTHOME/servers/"*.server)
   for f in "${serverprompt_server_files[@]}"; do
     n="$(basename "${f}")"
     server="$(sed 's/\.server//g' <<< "${n}")"
@@ -1587,10 +1587,14 @@ function multiprompt {
     ${promptfn} "${field}" "${promptmsg}" "${label}"
     promptresult=$?
     GROUP="${savedgroup}"
-    [ ${promptresult} = 0 ] || return ${promptresult}
+    if [ ${promptresult} != 0 ]; then
+      fields=( "${multiprompt_fields[@]}" )
+      labels=( "${multiprompt_labels[@]}" )
+      return ${promptresult}
+    fi
   done
-  export fields=( "${multiprompt_fields[@]}" )
-  export labels=( "${multiprompt_labels[@]}" )
+  fields=( "${multiprompt_fields[@]}" )
+  labels=( "${multiprompt_labels[@]}" )
 }
 # Hack, can't export globals so have to declare here and unset before using.
 declare -a fields
@@ -1664,6 +1668,8 @@ function recordsprompt {
       recordsprompt_fields \
       recordsprompt_labels \
       recordsprompt_promptmsgs
+    # At top level, reset group (this may have been called from multiprompt).
+    GROUP=""
   fi
 
   # Loop. If multiprompt returns with 1 we regenerate the menu.
@@ -1727,7 +1733,7 @@ function recordsprompt {
     fi
 
     # Prompt.
-    PROMPT="${prompt}" multiprompt "${title}" "1" <<< ""
+     PROMPT="${prompt}" multiprompt "${title}" "1" <<< ""
     [ $? = 1 ] || break
 
   done
@@ -2005,7 +2011,8 @@ function argsprompt {
 
   # Do multiprompt until all required values are supplied.
   while : ; do
-    PREFIX="" PREPROCESS="" multiprompt "${title}" "${num_columns}" <<< ""
+    PREFIX="" PREPROCESS="" GROUP="" \
+      multiprompt "${title}" "${num_columns}" <<< ""
     for field in "${argsprompt_required[@]}"; do
       [ -z "${!field}" ] && continue 2
     done
@@ -2349,7 +2356,7 @@ function keyexchange_remote_preflight {
   # Parse the key.
   [ -z "${key}" ] && fatal "No key given, aborting key exchange."
   IFS=" " read -r keyexchange_type keyexchange_pubkey _ <<< "${key}"
-  
+
   # Check the key format.
   tmpf="$(tempfile)"
   printf $'%s\n' "${key}" > "${tmpf}"
@@ -2359,7 +2366,7 @@ function keyexchange_remote_preflight {
   # Type is supplied?
   [ -z "${keyexchange_type}" ] &&
     fatal "Bad key format, no type given, aborting key exchange."
- 
+
   # Type equals "ssh-rsa" or "ssh-dsa" ?
   [ "${keyexchange_type}" = "ssh-rsa" ] ||
   [ "${keyexchange_type}" = "ssh-dss" ] ||
@@ -2368,7 +2375,7 @@ function keyexchange_remote_preflight {
   # Key is supplied?
   [ -z "${keyexchange_pubkey}" ] &&
     fatal "Bad key format, no key found, aborting key exchange."
- 
+
   # Key exchange file exists?
   keyexchange_file=~/.ssh/authorized_keys
   if [ -f "${keyexchange_file}" ]; then
@@ -2593,6 +2600,8 @@ read -d "" addserver_apache2vhosts_RECORD <<EOF
   cboxprompt | cboxdisplay |  n   | ssl   | Enable SSL
   textprompt | display     | *:80 | name  | NameVirtualHost | NameVirtualHost name (e.g. *:80)
   textprompt | display     |      | admin | ServerAdmin     | Server admin e-mail address
+  textprompt | display     | /var/log/apache2 | logdir | Logs directory | Apache2 logs directory
+  addserver_apache2vhosts_loglevel_prompt | display     | warn | loglevel | LogLevel | Apache2 LogLevel setting
 EOF
 
 read -d "" addserver_roles_CHECKBOXES <<EOF
@@ -2600,6 +2609,17 @@ read -d "" addserver_roles_CHECKBOXES <<EOF
   y  |  addserver_roles_dev         |  Development server
   y  |  addserver_roles_testing     |  Testing server
   y  |  addserver_roles_production  |  Production server
+EOF
+
+read -d "" apache2_loglevel_RADIOBUTTONS <<EOF
+  emerg  | Emergencies - system is unusable (emerg - NOT RECOMMENDED)
+  alert  | Action must be taken immediately (alert - NOT RECOMMENDED)
+  crit   | Critical Conditions (crit)
+  error  | Error conditions (error)
+  warn   | Warning conditions (warn)
+  notice | Normal but significant condition (notice)
+  info   | Informational (info)
+  debug  | Debug-level messages (debug)
 EOF
 
 function addserver_roles_sanitize {
@@ -2654,9 +2674,15 @@ function addserver_apache2vhosts_display {
 }
 
 function addserver_apache2vhosts_prompt {
-  GROUP="" \
-    recordsprompt apache2vhosts "virtual host" \
+  recordsprompt apache2vhosts "virtual host" \
     addserver_apache2vhosts_display <<< "${addserver_apache2vhosts_RECORD}"
+}
+
+function addserver_apache2vhosts_loglevel_prompt {
+  local -r addserver_apache2vhosts_loglevel_field="$1"
+  radioprompt "${!addserver_apache2vhosts_loglevel_field}" "$2" 1 \
+    <<< "${apache2_loglevel_RADIOBUTTONS}"
+  export ${addserver_apache2vhosts_loglevel_field}="${selected_value}"
 }
 
 function addserver_httpdtype_prompt {
@@ -2690,28 +2716,6 @@ function addserver_help {
 EOL
 }
 
-function addserver_preflight {
-
-  # Init ~/.ddo
-  if ! init_init; then
-    PREFLGHT_ERROR="Cannot initialize program directory $SCRIPTHOME."
-    return 1
-  fi
-
-  # Test access to $SCRIPTHOME/servers
-  f="$SCRIPTHOME/servers/TESTFILE"
-  touch "$f"
-  if [ -f "$f" ]; then
-    rm -f "$f"
-  else
-    PREFLGHT_ERROR="Cannot write to servers directory $SCRIPTHOME/servers."
-    return 1
-  fi
-
-  # Preflight passed.
-  return 0
-}
-
 function addserver_command_init {
   [ -z "${apache2vhosts_0_name}" ] &&
     export apache2vhosts_0_name="*:80"
@@ -2731,7 +2735,23 @@ function addserver_command_init {
     export apache2vhosts_1_admin="${addserver_user}@${addserver_host}"
 }
 
-function addserver_command {
+function addserver_preflight {
+
+  # Init ~/.ddo
+  if ! init_init; then
+    PREFLGHT_ERROR="Cannot initialize program directory $SCRIPTHOME."
+    return 1
+  fi
+
+  # Test access to $SCRIPTHOME/servers
+  f="$SCRIPTHOME/servers/TESTFILE"
+  touch "$f"
+  if [ -f "$f" ]; then
+    rm -f "$f"
+  else
+    PREFLGHT_ERROR="Cannot write to servers directory $SCRIPTHOME/servers."
+    return 1
+  fi
 
   # Process arguments.
   INIT="addserver_command_init" \
@@ -2742,8 +2762,14 @@ function addserver_command {
   file="$SCRIPTHOME/servers/${addserver_alias}.server"
   [ -f "$file" ] && fatal "Server file \"${addserver_alias}.server\" already exists, cowardly refusing to overwrite existing server configuration."
 
+  # Preflight passed.
+  return 0
+}
+
+function addserver_command {
+
   # Write output file.
-  for f in ${fields[@]}; do
+  for f in "${fields[@]}"; do
     local name=$(sed "s/addserver/${addserver_alias}/g" <<< ${f})
     printf "%q=%q\n" "${name}" "${!f}" >> "$file"
   done
@@ -2928,7 +2954,7 @@ function keyexchange_keytype_prompt {
   export keyexchange_keytype_label="${selected_label}"
   if [ -n "${keyexchange_keysize}" ]; then
     keyexchange_keysize_validate ||
-      keyexchange_keysize="" keyexchange_keysize_validate 
+      keyexchange_keysize="" keyexchange_keysize_validate
   fi
   [ -z "${keyexchange_keysize}" ] &&
     keyexchange_keysize_prompt keyexchange_keysize \
@@ -3037,7 +3063,7 @@ function keyexchange_preflight {
   if ! loadserver "${keyexchange_server}"; then
     fatal "Cannot load server \"${keyexchange_server}\"."
   fi
-  
+
   keyexchange_keysize_validate || return 4
 }
 
@@ -3046,7 +3072,7 @@ function keyexchange_command {
   # Execute remote key exchange command.
   echo $'\n'"Exchanging keys..."
   local result="$(remote "${keyexchange_server}" keyexchange_remote "${keyexchange_key}")"
-  
+
   # Command succeeded?
   if [ $? = 0 ]; then
 
