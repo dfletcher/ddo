@@ -462,6 +462,15 @@ function string_contains {
   grep "$2" <<< "$1" >> /dev/null
 }
 
+# TODO documentation.
+# NOTE: temp files with this function do not need to be explicitly deleted,
+# they will be removed automatically at script shutdown.
+function tempfile {
+  local spec
+  [ -n "$1" ] && spec="$1" || spec="tmp.XXXXXXXXXX"
+  mktemp "${TEMPDIR}/${spec}"
+}
+
 # -------------------------------------------------------
 # read_arrays(variable1 [, variable2 [, variable3 ... ]])
 # -------------------------------------------------------
@@ -2330,32 +2339,42 @@ function init_vhost_command {
 # SERVER COMMAND: keyexchange_remote
 #-----------------------------------
 
-KEYEXCHANGE_AUTHORIZED_KEYS=~/.ssh/authorized_keys
+keyexchange_remote_DEPS="ssh-keygen"
 
 function keyexchange_remote_preflight {
 
+  local tmpf
   local key="$1"
-  echo "key: ${key}"
 
   # Parse the key.
   [ -z "${key}" ] && fatal "No key given, aborting key exchange."
   IFS=" " read -r keyexchange_type keyexchange_pubkey _ <<< "${key}"
   
-  # Have two fields?
-  [ -z "${keyexchange_type}" ] || [ -z "${keyexchange_pubkey}" ] &&
-    fatal "Bad key format, aborting key exchange."
+  # Check the key format.
+  tmpf="$(tempfile)"
+  printf $'%s\n' "${key}" > "${tmpf}"
+  ${SSH_KEYGEN:?} -l -f "${tmpf}" >> /dev/null ||
+    fatal "Bad key format, ssh-keygen cannot recognize the type."
 
+  # Type is supplied?
+  [ -z "${keyexchange_type}" ] &&
+    fatal "Bad key format, no type given, aborting key exchange."
+ 
   # Type equals "ssh-rsa" or "ssh-dsa" ?
   [ "${keyexchange_type}" = "ssh-rsa" ] ||
   [ "${keyexchange_type}" = "ssh-dss" ] ||
     fatal "Sorry I don't understand key type \"${keyexchange_type}\", aborting key exchange."
 
+  # Key is supplied?
+  [ -z "${keyexchange_pubkey}" ] &&
+    fatal "Bad key format, no key found, aborting key exchange."
+ 
   # Key exchange file exists?
-  keyexchange_file="${KEYEXCHANGE_AUTHORIZED_KEYS}"
+  keyexchange_file=~/.ssh/authorized_keys
   if [ -f "${keyexchange_file}" ]; then
     export keyexchange_file_exists=1
     # Is this key already in the file?
-    if grep "${keyexchange_pubkey}" "${keyexchange_file}" >> /dev/null; then
+    if ${GREP:?} "${keyexchange_pubkey}" "${keyexchange_file}" >> /dev/null; then
       export keyexchange_file_haskey=1
     else
       export keyexchange_file_haskey=0
@@ -2383,6 +2402,8 @@ function keyexchange_remote_command {
   if [ ${keyexchange_file_exists:?} != 0 ]; then
     # File exists, append it.
     echo "${key}" >> "${keyexchange_file:?}"
+    ${GREP:?} "${keyexchange_pubkey:?}" "${keyexchange_file:?}" >> /dev/null ||
+      fatal "Could not add key to file ${keyexchange_file:?}."
     echo "Added key to ${keyexchange_file:?} on $(hostname)."
   else
     # No existing file, create a new one.
@@ -2390,12 +2411,10 @@ function keyexchange_remote_command {
     [ -f "${keyexchange_file:?}" ] ||
       fatal "Could not create file ${keyexchange_file:?} on $(hostname)."
     chmod 0600 "${keyexchange_file:?}"
+    ${GREP:?} "${keyexchange_pubkey:?}" "${keyexchange_file:?}" >> /dev/null ||
+      fatal "Could not add key to file ${keyexchange_file:?}."
     echo "Created ${keyexchange_file:?} on $(hostname)."
   fi
-
-  # Verify.
-  grep "${keyexchange_pubkey:?}" "${keyexchange_file:?}" >> /dev/null ||
-    fatal "Could not add key to file ${keyexchange_file:?}."
 }
 
 #------------------------------------------------------------------------------
@@ -2820,6 +2839,8 @@ EOF
 # USER COMMAND: keyexchange
 #--------------------------
 
+keyexchange_DEPS="ssh-keygen"
+
 read -d "" keyexchange_CONFIG << EOF
 
   keyexchange_server | =PROMPT | \
@@ -2995,7 +3016,7 @@ function keyexchange_preflight {
     keygenargs[${#keygenargs[@]}]="-f"
     keygenargs[${#keygenargs[@]}]="${filepath}"
     echo $'\n'"Note: pick no passphrase or you will be typing it a lot. If you do pick a passphrase make it easy to type."$'\n'
-    ssh-keygen "${keygenargs[@]}" || fatal "Error running ssh-keygen."
+    ${SSH_KEYGEN:?} "${keygenargs[@]}" || fatal "Error running ssh-keygen."
     chmod 0600 "${filepath}"
     chmod 0600 "${filepath}.pub"
     local -r pubkey="${filepath}.pub"
@@ -3292,11 +3313,12 @@ fi
 
 # Process deps.
 prog _AWK awk # temp need for loop below.
+prog _SED sed
 for dep in ${deps}; do
-  depname=`echo $dep | $_AWK '{print toupper($0)}'`
+  depname=$($_SED 's/[-]/_/g' <<< "${dep}" | $_AWK '{print toupper($0)}')
   prog $depname $dep
 done
-unset _AWK
+unset _AWK _SED
 unset missing
 
 # Set up the temporary directory.
