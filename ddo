@@ -2525,7 +2525,7 @@ function apache2_init_command {
 
 php5_init_DEPS="php"
 package_Ubuntu_php="php5"
-package_CentOS_php="php php-gd php-ldap php-odbc php-pear php-xml php-xmlrpc php-mbstring php-snmp php-soap curl curl-devel"
+package_CentOS_php="php php-gd php-ldap php-odbc php-pear php-xml php-xmlrpc php-mbstring php-snmp php-soap curl libcurl-devel"
 
 function postpackage_CentOS_php {
   privileged systemctl restart httpd.service
@@ -3286,7 +3286,6 @@ function keyexchange_command {
   # Execute remote key exchange command.
   echo $'\n'"Exchanging keys..."
   #local result="$(remote "${keyexchange_server}" keyexchange_remote "${keyexchange_key}")"
-
   remote "${keyexchange_server}" keyexchange_remote "${keyexchange_key}" ||
     fatal "Could not complete key exchange."
 
@@ -3517,10 +3516,7 @@ else
       fatal "Opreation cencelled by user."
     fi
   fi
-  #if [ "${_uname}" != "Cygwin" ] && [ -n "${_APTGET}" ]; then
-  #fi
 fi
-#&& OS="$(${_LSB_RELEASE} -si)" || OS="$(uname -o)"
 
 declare -r PM_INSTALL=$(ns package_ $OS)
 declare -r PM_CHECK=$(ns packagecheck_ ${OS})
@@ -3568,11 +3564,11 @@ for command_and_args in "${commands[@]}"; do
     deps+=" ${!command_DEPS}"
   fi
 done
-deps="$(xargs -n1 <<< "${deps}" | sort -u | xargs)"
+deps=( $(xargs -n1 <<< "${deps}" | sort -u | xargs) )
 
 # Find packages for dep programs.
 declare packages
-for dep in ${deps}; do
+for dep in ${deps[@]}; do
   packagefield=$(ns package_ $OS _ $dep)
   if [ -n "${!packagefield}" ]; then
     packages+=" ${!packagefield}"
@@ -3580,25 +3576,25 @@ for dep in ${deps}; do
     packages+=" ${dep}"
   fi
 done
-packages="$(xargs -n1 <<< "${packages}" | sort -u | xargs)"
+packages=( $(xargs -n1 <<< "${packages}" | sort -u | xargs) )
 
 # Find missing packages.
-declare missing
-for package in ${packages}; do
+declare -a missing
+for package in ${packages[@]}; do
   if func ${PM_CHECK}; then
-    ${PM_CHECK} "${package}" || missing+="${package} "
+    ${PM_CHECK} "${package}" || missing[${#missing[@]}]="${package} "
   else
-    prog _ "${package}" || missing+="${package} "
+    prog _ "${package}" || missing[${#missing[@]}]="${package} "
   fi
 done
 
 # Process missing deps.
-if [ -n "$missing" ]; then
+if [ ${#missing[@]} -gt 0 ]; then
 
-  echo -e "\nMissing tools: ${missing}"
+  echo "Installing missing packages: ${missing[*]}"
 
   # prepackage functions
-  for package in ${missing}; do
+  for package in ${missing[@]}; do
     f="$(ns prepackage_ "${OS}" _ "${package}")"
     if func "${f}"; then
       ${f} ${package} || fatal "Could not preprocess package \"${package}\"."
@@ -3606,22 +3602,15 @@ if [ -n "$missing" ]; then
   done
 
   # Run package manager.
-  echo "Installing packages: ${missing}"
-  ${PM_INSTALL} ${missing}
+  ${PM_INSTALL} ${missing[@]}
 
   # Did that solve it?
   unset still_missing
   declare satisfied=( )
-  for item in ${missing}; do
-    if func ${PM_CHECK}; then
-      ${PM_CHECK} "${item}" &&
-        satisfied[${#satisfied[@]}]="$item" ||
-        still_missing+="$item "
-    else
-      prog _ "${package}" &&
-        satisfied[${#satisfied[@]}]="$item" ||
-        still_missing+="$item "
-    fi
+  for item in ${missing[@]}; do
+    func ${PM_CHECK} && ${PM_CHECK} "${item}" &&
+      satisfied[${#satisfied[@]}]="$item" ||
+      still_missing+="$item "
   done
 
   # postpackage functions
@@ -3633,17 +3622,16 @@ if [ -n "$missing" ]; then
   # Report.
   echo
   if [ -n "$still_missing" ]; then
-    echo "Could not automatically resolve the following missing tools: $still_missing" ||
-    exit 1
+    fatal "Could not automatically resolve the following missing tools: $still_missing"
   else
-    echo "Automatically resolved missing deps \"$missing\"."
+    echo "Automatically resolved missing deps: ${satisfied[*]}."
   fi
 fi
 
 # Process deps.
 prog _AWK awk # temp need for loop below.
 prog _SED sed
-for dep in ${deps}; do
+for dep in ${deps[@]}; do
   depname=$($_SED 's/[-]/_/g' <<< "${dep}" | $_AWK '{print toupper($0)}')
   prog $depname $dep
 done
