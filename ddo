@@ -1947,7 +1947,7 @@ function recordsprompt_addfn {
   local -r fields=( $3 )
   for i in "${!fields[@]}"; do
     field="${records}_${nextkey}_${fields[$i]}"
-    value="${recordsprompt_defaults:?[$i]}"
+    value="${recordsprompt_defaults[$i]}"
     export ${field}="${value}"
   done
 }
@@ -2468,12 +2468,11 @@ function radinit {
     if [ ${#multiprompt_fields[@]} = ${n} ]; then
       # There was no valid $selected_value so pick "0" and configure for it.
       n=0
-      export selected_value="${multiprompt_fields:?[$n]}"
-      export selected_label="${multiprompt_labels:?[$n]}"
     fi
     export selected_index="$n"
   fi
-  export selected_label="${multiprompt_labels:?[${selected_index}]}"
+  export selected_value="${multiprompt_fields[$selected_index]}"
+  export selected_label="${multiprompt_labels[$selected_index]}"
 }
 
 #------------------------------------------------------------------------------
@@ -3133,10 +3132,10 @@ function keyexchange_keyfile_prompt {
     echo
     echo "No keys exist in ~/.ssh, creating one."
   else
-    PROMPT="Select file or press [ENTER] to confirm selection" \
-      radioprompt "${keyexchange_keyfile}" "$2" 1 <<< "${config}"
+    radioprompt keyexchange_keyfile \
+      "Select file or press [ENTER] to confirm selection" "$2" <<< "${config}"
   fi
-  export keyexchange_keyfile="${selected_value}"
+  echo "keyexchange_keyfile=${selected_value} (${selected_label})"
   export keyexchange_keyfile_label="${selected_label}"
   [ -z "${keyexchange_keytype}" ] &&
     keyexchange_keytype_prompt keyexchange_keytype \
@@ -3460,12 +3459,12 @@ function packagecheck_Ubuntu {
 
 # Package manager function for CentOS.
 function package_CentOS {
-  runlongprivileged "Installing $1" yum -y -q install "$1"
+  runlongprivileged "Installing $*" yum -y -q install "$@"
 }
 
 # Package test function for CentOS.
 function packagecheck_CentOS {
-  yum list installed "$1" >/dev/null 2>&1
+  yum list installed "$@" >/dev/null 2>&1
 }
 
 # CentOS core packages.
@@ -3608,17 +3607,21 @@ if [ -n "$missing" ]; then
 
   # Run package manager.
   echo "Installing packages: ${missing}"
-  for package in ${missing}; do
-    ${PM_INSTALL} ${package}
-  done
+  ${PM_INSTALL} ${missing}
 
   # Did that solve it?
   unset still_missing
   declare satisfied=( )
-  for item in $missing; do
-    prog DEP "${item}" &&
-      satisfied[${#satisfied[@]}]="$item" ||
-      still_missing+="$item "
+  for item in ${missing}; do
+    if func ${PM_CHECK}; then
+      ${PM_CHECK} "${item}" &&
+        satisfied[${#satisfied[@]}]="$item" ||
+        still_missing+="$item "
+    else
+      prog _ "${package}" &&
+        satisfied[${#satisfied[@]}]="$item" ||
+        still_missing+="$item "
+    fi
   done
 
   # postpackage functions
