@@ -4,11 +4,17 @@
 
 # TODO: developer documentation: command and preflight function patterns.
 
+if test "$SHELL" != "/bin/bash"; then
+  echo "Sorry this script requires bash to be your login script on remote servers. Please set your login shell to /bin/bash or use a different remote user with a bash login."
+  exit 255
+fi
+
+declare -r HOSTNAME="$(hostname)"
 declare -r SCRIPTHOME="$HOME/.ddo"
 declare -r SCRIPTPATH="$0"
 declare -r USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
-declare -r SERVER_COMMANDS="ping init_vhost keyexchange_remote apache2_init mysql_scan"
-declare -r DEPS="dd od tee cat ssh awk grep sed wget git tbl groff tr"
+declare -r SERVER_COMMANDS="uname init_vhost keyexchange_remote apache2_init php5_init mysql_scan"
+declare -r DEPS="dd od tee cat ssh awk grep sed tbl groff tr xargs"
 
 # $PROGRAM
 program="$(basename "$0")"
@@ -230,15 +236,18 @@ function ssh_pw_required {
 #
 # USAGE EXAMPLE:
 #
-#   sshcmd mysite.com fletch ping # Prints `uname -a` from the server.
+#   sshcmd mysite.com fletch uname # Prints `uname -a` from the server.
 #
 function sshcmd {
-  local script
   local -r sshcmd_host=$1; shift
   local -r sshcmd_user=$1; shift
+  local -r scr="arguments=( $(printf " %q" "$@") )"$'\n'"$(cat "$SCRIPTPATH")"
   local -r sshcmd_identity=$(get IDENTITY_FILE)
   local sshcmd_options=( $(get SSH_OPTIONS) )
   local -a args
+  args[${#args[@]}]="-q"
+  #args[${#args[@]}]="-C"
+  args[${#args[@]}]="-t"
   if [ -f "${sshcmd_identity}" ]; then
     args[${#args[@]}]="-i"
     args[${#args[@]}]="${sshcmd_identity}";
@@ -256,9 +265,8 @@ function sshcmd {
   # and running it in a single shot. Attempts to do it using stdin break
   # SSH's pty and then prompting functions and sudo fail to work on remote.
   # Still looking for a nicer way to achieve it.
-  script="arguments=( $(printf " %q" "$@") )"$'\n'
-  script+="$(cat "$SCRIPTPATH")"$'\n'
-  ${SSH} -Ctt "${args[@]}" "${script}" 2>&1 | grep -v "^Connection to .* closed\..*$"
+  args[${#args[@]}]="${scr}"
+  ${SSH} "${args[@]}"
 }
 
 # -------------------
@@ -286,7 +294,7 @@ function sshcmd {
 #
 # USAGE EXAMPLE:
 #
-#   remote mysite ping # Prints `uname -a` from the server.
+#   remote mysite uname # Prints `uname -a` from the server.
 #
 function remote {
   local -r remote_server="$1"; shift
@@ -327,12 +335,14 @@ function remote {
 #   echo ENV: $ENV
 #
 function prog {
-  cmd="$(command -v "$2")"
+  local -r fld="$1"
+  local cmd="$(command -v "$2")"
   [ ! -f "$cmd" ] && cmd="$(which "$2" 2> /dev/null)" # $(command) doesn't work when alias.
-  [ ! -f "$cmd" ] && return 255 # $(command) and $(which) failed, bail.
+  [ ! -f "$cmd" ] && read _ cmd _ <<< "$(whereis "$2")"
+  [ ! -f "$cmd" ] && return 255 # $(command) $(which) $(whereis) all failed, bail.
   [ -x "$cmd" ]
   rval=$?
-  [ $rval ] && export $1="$(command -v "$2")"
+  [ $rval ] && export ${fld}="$(command -v "$2")"
   return $rval
 }
 
@@ -395,7 +405,7 @@ function func {
 #    echo "++ `$(ns "n" "s") arg arg arg` ++"   -->  ++ argargarg ++
 #
 function ns {
-  ${SED} "s/\s//g" <<< "$@"
+  ${SED} -e 's/\s//g' -e 's/-/_/g' <<< "$@"
 }
 
 # ------------------------
@@ -459,7 +469,7 @@ function trim {
 
 # TODO documentation.
 function string_contains {
-  grep "$2" <<< "$1" >> /dev/null
+  grep "$2" <<< "$1" >/dev/null
 }
 
 # TODO documentation.
@@ -674,7 +684,7 @@ function tableformat {
     for field in "${a[@]}"; do
       # TODO figure out how to get rid of `echo -e` here.
       i=$((i+1))
-      v="$(echo -e "${field}" | ${SED} -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | ${TR} -s ' ')"
+      v="$(echo -e "${field}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -s ' ')"
       [ -z "${v}" ] && continue
       [ $i -gt 1 ] && body+="${tab}"
       [ ${#v} = 1 ] &&
@@ -705,7 +715,7 @@ function tableformat {
   # Use `tbl | groff` for formatting. `grotty` seems to have a spurious error
   # sometimes so /dev/null STDERR on groff (which calls grotty).
   #echo "${fmtstr}"
-  ${TBL} <<< "${fmtstr}" | ${GROFF} "-T${mode}" 2>/dev/null
+  tbl <<< "${fmtstr}" | groff "-T${mode}" 2>/dev/null
 }
 
 # -----------
@@ -780,6 +790,200 @@ function usage {
     help [COMMAND] | Display help for a specific command.
 EOF
   [ -n "$1" ] && echo "ERROR: $1."
+}
+
+# ----------------------------------------------------------
+# privileged(command, ...args... [ -- command, ...args ...])
+# ----------------------------------------------------------
+#
+# Utility: Run command(s) with elvated privileges. First attempts to run each
+# command raw. If that fails, attempt agai using `sudo`.
+#
+# ARGS:    [ TODO DOCUMENT ME ]
+#
+# STDIN:   [ TODO DOCUMENT ME ]
+#
+# STDOUT:  Unused
+#
+# VARS:    None
+#
+# DEPS:    sed tr tbl groff
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLE:
+#
+#   [ TODO DOCUMENT ME ]
+#
+function privileged {
+  local -i result=0
+  local -i runraw=1
+  local -i runelevated=1
+  if [ "$1" == "--runraw" ]; then
+    runelevated=0
+    shift
+  fi
+  if [ "$1" == "--runelevated" ]; then
+    runraw=0
+    shift
+  fi
+  if [ ${runraw} = 1 ]; then
+    _privileged_run _privileged_runraw "$@"
+    result=$?
+    if [ ${result} != 0 ] && [ ${runelevated} = 1 ]; then
+      _privileged_run _privileged_runelevated "$@"
+      result=$?
+    fi
+  else
+    if [ ${runelevated} = 1 ]; then
+      _privileged_run _privileged_runelevated "$@"
+      result=$?
+    fi
+  fi
+  return ${result}
+}
+
+# -----------------
+# _privileged_run()
+# -----------------
+#
+# Internal workhorse function used by privileged(), do not call directly.
+#
+function _privileged_run {
+  local -r callback="$1"; shift
+  local command=( )
+  while : ; do
+    [ -z "$1" ] && break
+    if [ "$1" == "--" ]; then
+      _privileged_run_callback || return $?
+      command=( )
+    fi
+    command[${#command[@]}]="$1"
+    shift
+  done
+  _privileged_run_callback || return $?
+  return 0
+}
+
+# --------------------------
+# _privileged_run_callback()
+# --------------------------
+#
+# Internal workhorse function used by privileged(), do not call directly.
+#
+function _privileged_run_callback {
+  local result=0
+  if [ ${#command[@]} -gt 0 ]; then
+    ${callback:?} "${command[@]}"
+    result=$?
+  fi
+  return ${result}
+}
+
+# --------------------
+# _privileged_runraw()
+# --------------------
+#
+# Internal workhorse function used by privileged(), do not call directly.
+#
+function _privileged_runraw {
+  "$@"
+}
+
+# -------------------------
+# _privileged_runelevated()
+# -------------------------
+#
+# Internal workhorse function used by privileged(), do not call directly.
+#
+function _privileged_runelevated {
+  # TODO more / alternate ways to achieve escalated privileges than just sudo.
+  sudo "$@"
+}
+
+# -----------------------------------
+# runlong(label, command, ...args...)
+# -----------------------------------
+#
+# Utility: Run a long process in background, display a spinner while running.
+#
+# ARGS:    [ TODO DOCUMENT ME ]
+#
+# STDIN:   [ TODO DOCUMENT ME ]
+#
+# STDOUT:  Unused
+#
+# VARS:    None
+#
+# DEPS:    sed tr tbl groff
+#
+# RETURN:  Result of command.
+#
+# USAGE EXAMPLE:
+#
+#   [ TODO DOCUMENT ME ]
+#
+function runlong() {
+  local -r label="$1"; shift
+  local -r spin=( "/" "-" "\\" "|" )
+  local -r out="$(tempfile)"
+  local -r err="$(tempfile)"
+  local n=0
+  printf '%s... ' "${label}"
+  "$@" 1> "${out}" 2> "${err}" &
+  pid=$!
+  printf '%s' $'\e[?25l' # Hide text cursor.
+  while ps -p ${pid} >/dev/null; do
+    [ ${n} -gt 0 ] && printf '%s' $'\b'
+    i=$((n%${#spin[@]}))
+    n=$((n+1))
+    printf '%s' "${spin[${i}]}"
+    sleep 0.25 >/dev/null 2>&1
+  done
+  [ ${n} -gt 0 ] && printf '%s' $'\b \b'
+  printf '%s' $'\e[?25h' # Normal text cursor.
+  # Call wait to obtain process result.
+  wait ${pid}
+  local -i result=$?
+  if [ ${result} = 0 ]; then
+    printf $'[OK]\n'
+  else
+    printf $'%s\n' "[$(cat "${err}")]"
+  fi
+  rm "${out}"
+  rm "${err}"
+  return ${result}
+}
+
+# ---------------------------------------------
+# runlongprivileged(label, command, ...args...)
+# ---------------------------------------------
+#
+# Same as runlong but run the command with sudo.
+#
+# ARGS:    [ TODO DOCUMENT ME ]
+#
+# STDIN:   [ TODO DOCUMENT ME ]
+#
+# STDOUT:  Unused
+#
+# VARS:    None
+#
+# DEPS:    sed tr tbl groff
+#
+# RETURN:  Unused
+#
+# USAGE EXAMPLE:
+#
+#   [ TODO DOCUMENT ME ]
+#
+function runlongprivileged {
+  local -r label="$1"; shift
+  printf $'\n'
+  if ! privileged --runraw runlong "${label}" "$@"; then
+    privileged --runelevated true
+    runlong "${label}" privileged --runelevated "$@"
+  fi
 }
 
 # --------------------
@@ -930,13 +1134,6 @@ function argshelp {
     $helplines
 EOF
   longhelp "$command"
-}
-
-# Utility: Check `sudo` access. Sets PREFLGHT_ERROR and returns a nonzero value
-# if the access check failed.
-function preflight_sudo {
-  # TODO!
-  return 1
 }
 
 #------------------------------------------------------------------------------
@@ -2140,19 +2337,16 @@ function cboxpreprocess {
 # UI: radio buttons
 #------------------------------------------------------------------------------
 
-# ----------------------------------------
-# radioprompt(default, title, num_columns)
-# ----------------------------------------
+# ---------------------------------------------
+# radioprompt(fieldname, prompt_message, label)
+# ---------------------------------------------
 #
 # Simplified multiprompt that works with a group of related checkboxes. Upon
 # completion, each supplied field will either have a value of 'y' or 'n'.
 #
-# ARGS:  - default: Which option is selected by default. Must be a field in the
-#          STDIN data or item #1 will be selected by default.
-#
-#        - title: Text to show above the option listing.
-#
-#        - num_columns: Number of columns in the listing. Optional. Default=3.
+# ARGS:    - fieldname
+#          - prompt_message
+#          - label
 #
 # STDIN:   Rows of field records. Columns are separated with "|" by default
 #          and rows are separated with a newline character. Lines starting with
@@ -2213,16 +2407,31 @@ function cboxpreprocess {
 # See STDIN above for column definitions.
 #
 function radioprompt {
-  if [ -z "$3" ]; then
-    local -r num_columns=3
+  local -r radioprompt_field="$1"
+  local -r radioprompt_options_field="${radioprompt_field}_OPTIONS"
+  local -r radioprompt_options="${!radioprompt_options_field}"
+  if [ -n "$4" ]; then
+    local -r num_columns="$4"
   else
-    local -r num_columns="$3"
+    local -r num_columns=1
   fi
-  local -r msg="$(get PROMPT "Toggle items or press [ENTER] to confirm")"
-  export selected_value="$1"
+  if [ -n "$2" ]; then
+    local -r prompt="${2}"
+  else
+    local -r prompt="$(get PROMPT "Toggle items or press [ENTER] to confirm")"
+  fi
+  export selected_value="${!radioprompt_field}"
   export selected_index=""
-  PREFIX="radprompt | raddisplay | |" INIT="radinit" PROMPT="${msg}" GROUP="" \
-    multiprompt "$2" "${num_columns}"
+  if [ -n "${radioprompt_options}" ]; then
+    PREFIX="radprompt | raddisplay | |" \
+    INIT="radinit" PROMPT="${prompt}" GROUP="" \
+      multiprompt "$3" "${num_columns}" <<< "${radioprompt_options}"
+  else
+    PREFIX="radprompt | raddisplay | |" \
+    INIT="radinit" PROMPT="${prompt}" GROUP="" \
+      multiprompt "$3" "${num_columns}"
+  fi
+  export ${radioprompt_field}="${selected_value}"
 }
 
 # ---------
@@ -2271,15 +2480,15 @@ function radinit {
 # Server commands
 #------------------------------------------------------------------------------
 
-#---------------------
-# SERVER COMMAND: ping
-#---------------------
+#----------------------
+# SERVER COMMAND: uname
+#----------------------
 
-function ping_preflight {
+function uname_preflight {
   return 0
 }
 
-function ping_command {
+function uname_command {
   uname -a
   return 0
 }
@@ -2288,44 +2497,43 @@ function ping_command {
 # SERVER COMMAND: apache2_init
 #-----------------------------
 
-apache2_init_DEPS="apache2ctl a2ensite a2dissite a2enmod a2dismod"
-package_Ubuntu_apache2ctl="apache2"
-package_Ubuntu_a2ensite="apache2"
-package_Ubuntu_a2dissite="apache2"
-package_Ubuntu_a2enmod="apache2"
-package_Ubuntu_a2dismod="apache2"
+apache2_init_DEPS="apachectl"
+package_Ubuntu_apachectl="apache2"
+package_CentOS_apachectl="httpd"
+
+function postpackage_CentOS_apachectl {
+  privileged \
+       systemctl start httpd.service \
+    -- systemctl start httpd.service \
+    -- systemctl enable httpd.service \
+    -- firewall-cmd --permanent --zone=public --add-service=http \
+    -- firewall-cmd --permanent --zone=public --add-service=https \
+    -- firewall-cmd --reload
+}
 
 function apache2_init_preflight {
-  local varname line
-  local -a sudo_missing
-  echo "+INFO testing 123"
-  if [ ! -d "$1" ]; then
-    PREFLGHT_ERROR="Cannot read Apache2 config directory '$1'."
-    return 1
-  fi
-  for dep in ${apache2_init_DEPS}; do
-    # shellcheck disable=SC2016
-    varname="$(${AWK} '{print toupper($0)}' <<< "${dep}")"
-    line="$USER ALL = NOPASSWD:${!varname}"
-    grep "${line}" /etc/sudoers || sudo_missing[${#sudo_missing[@]}]="${line}"
-  done
-  printf $'+INFO  - %s\n' "${sudo_missing[@]}"
-  #if [ ${#sudo_missing[@]} > 0 ]; then
-  #  # TODO print the sudo_missing list of lines.
-  #  if ynprompt "Add these lines to /etc/sudoers?"; then
-  #    # TODO be more careful about existing sudoers.new if exists.
-  #    local missing="$(printf $'%s\n' "${sudo_missing[@]}")"
-  #    sed "/# User privilege specification/${missing}\n" /etc/sudoers |
-  #      sudo ${TEE} /etc/sudoers.new
-  #  fi
-  #fi
-  return 0
+  true
+  # TODO make sure we can find approriate directory to put vhost configs.
 }
 
 function apache2_init_command {
-  echo "+INFO testing 456"
-  echo "$1"
-  return 0
+  true
+}
+
+#--------------------------
+# SERVER COMMAND: php5_init
+#--------------------------
+
+php5_init_DEPS="php"
+package_Ubuntu_php="php5"
+package_CentOS_php="php php-gd php-ldap php-odbc php-pear php-xml php-xmlrpc php-mbstring php-snmp php-soap curl curl-devel"
+
+function postpackage_CentOS_php {
+  privileged systemctl restart httpd.service
+}
+
+function php5_init_command {
+  true
 }
 
 
@@ -2334,7 +2542,6 @@ function apache2_init_command {
 #---------------------------
 
 function init_vhost_preflight {
-  preflight_sudo || return 1
   return 0
 }
 
@@ -2348,6 +2555,8 @@ function init_vhost_command {
 
 keyexchange_remote_DEPS="ssh-keygen"
 
+package_CentOS_ssh_keygen=openssh-clients
+
 function keyexchange_remote_preflight {
 
   local tmpf
@@ -2360,7 +2569,7 @@ function keyexchange_remote_preflight {
   # Check the key format.
   tmpf="$(tempfile)"
   printf $'%s\n' "${key}" > "${tmpf}"
-  ${SSH_KEYGEN:?} -l -f "${tmpf}" >> /dev/null ||
+  ${SSH_KEYGEN:?} -l -f "${tmpf}" >/dev/null ||
     fatal "Bad key format, ssh-keygen cannot recognize the type."
 
   # Type is supplied?
@@ -2381,7 +2590,7 @@ function keyexchange_remote_preflight {
   if [ -f "${keyexchange_file}" ]; then
     export keyexchange_file_exists=1
     # Is this key already in the file?
-    if ${GREP:?} "${keyexchange_pubkey}" "${keyexchange_file}" >> /dev/null; then
+    if ${GREP:?} "${keyexchange_pubkey}" "${keyexchange_file}" >/dev/null; then
       export keyexchange_file_haskey=1
     else
       export keyexchange_file_haskey=0
@@ -2398,10 +2607,11 @@ function keyexchange_remote_preflight {
 function keyexchange_remote_command {
 
   local key="$1"
+  local dir="$(dirname "${keyexchange_file:?}")"
 
   # Is this key already in authorized_keys?
   if [ ${keyexchange_file_haskey:?} != 0 ]; then
-    echo "Key is already in file ${keyexchange_file:?} on $(hostname), skipping."
+    echo "Key is already in file ${keyexchange_file:?} on ${HOSTNAME}, skipping."
     return 0
   fi
 
@@ -2409,18 +2619,23 @@ function keyexchange_remote_command {
   if [ ${keyexchange_file_exists:?} != 0 ]; then
     # File exists, append it.
     echo "${key}" >> "${keyexchange_file:?}"
-    ${GREP:?} "${keyexchange_pubkey:?}" "${keyexchange_file:?}" >> /dev/null ||
+    ${GREP:?} "${keyexchange_pubkey:?}" "${keyexchange_file:?}" >/dev/null ||
       fatal "Could not add key to file ${keyexchange_file:?}."
-    echo "Added key to ${keyexchange_file:?} on $(hostname)."
+    echo "Added key to ${keyexchange_file:?} on ${HOSTNAME}."
   else
     # No existing file, create a new one.
+    if [ ! -d "${dir}" ]; then
+      mkdir -p "${dir}"
+      [ -d "${dir}" ] || fatal "Could not create directory ${dir}."
+      chmod 0700 "${dir}"
+    fi
     echo "${key}" > "${keyexchange_file:?}"
     [ -f "${keyexchange_file:?}" ] ||
-      fatal "Could not create file ${keyexchange_file:?} on $(hostname)."
+      fatal "Could not create file ${keyexchange_file:?} on ${HOSTNAME}."
     chmod 0600 "${keyexchange_file:?}"
-    ${GREP:?} "${keyexchange_pubkey:?}" "${keyexchange_file:?}" >> /dev/null ||
+    ${GREP:?} "${keyexchange_pubkey:?}" "${keyexchange_file:?}" >/dev/null ||
       fatal "Could not add key to file ${keyexchange_file:?}."
-    echo "Created ${keyexchange_file:?} on $(hostname)."
+    echo "Created ${keyexchange_file:?} on ${HOSTNAME}."
   fi
 }
 
@@ -2575,7 +2790,7 @@ read -d "" addserver_CONFIG <<EOF
   addserver_httpdtype | apache2 | \
     Web server type | Web server type | \
     --httpd-type | -H | Web server type (currently only apache2). | \
-    addserver_httpd | addserver_httpdtype_prompt
+    addserver_httpd | radioprompt | addserver_httpd_display
 
   addserver_apache2conf | /etc/apache2 | \
     Apache 2 configuration directory | Apache 2 configuration directory | \
@@ -2593,6 +2808,11 @@ read -d "" addserver_CONFIG <<EOF
     addserver_httpd[addserver_httpdtype=apache2] | \
     addserver_apache2vhosts_prompt
 
+EOF
+
+read -d "" addserver_httpdtype_OPTIONS <<EOF
+    apache2 |   Apache 2
+    nginx   |   Nginx
 EOF
 
 # TODO: E-mail prompt for ServerAdmin.
@@ -2685,14 +2905,6 @@ function addserver_apache2vhosts_loglevel_prompt {
   export ${addserver_apache2vhosts_loglevel_field}="${selected_value}"
 }
 
-function addserver_httpdtype_prompt {
-  local -r addserver_httpdtype_prompt_field="$1"
-  PROMPT="" radioprompt "${!addserver_httpdtype_prompt_field}" "$2" 3 <<EOF
-    apache2 |   Apache 2
-    nginx   |   Nginx
-EOF
-  export ${addserver_httpdtype_prompt_field}="${selected_value}"
-}
 
 function addserver_database_display {
   dbuser=$(get addserver_dbuser "[USER NOT SET]")
@@ -2703,7 +2915,10 @@ function addserver_database_display {
 }
 
 function addserver_httpd_display {
-  echo "$2: ${addserver_httpdtype}"
+  case ${addserver_httpdtype} in
+    apache2) echo "$2: Apache 2" ;;
+    nginx) echo "$2: Nginx" ;;
+  esac
 }
 
 function addserver_shorthelp {
@@ -2817,7 +3032,7 @@ EOF
   # Test remote.
   echo
   printf "Testing remote access... "
-  if remoteuname="$(remote "$addserver_alias" ping)"; then
+  if remoteuname="$(remote "$addserver_alias" uname)"; then
     printf $'[OK]\n'
   else
     printf $'[ERROR]\n'
@@ -2829,7 +3044,7 @@ EOF
   printf "Initialzing ${addserver_httpdtype} server... "
   case "${addserver_httpdtype}" in
     "apache2")
-      remote "${addserver_alias}" apache2_init "${addserver_httpdconf}" &&
+      remote "${addserver_alias}" apache2_init "${addserver_httpdconf}" -- php5_init &&
         printf "${result}"$' [OK]\n' || printf $'[ERROR]\n'
     ;;
     "nginx")
@@ -3071,7 +3286,10 @@ function keyexchange_command {
 
   # Execute remote key exchange command.
   echo $'\n'"Exchanging keys..."
-  local result="$(remote "${keyexchange_server}" keyexchange_remote "${keyexchange_key}")"
+  #local result="$(remote "${keyexchange_server}" keyexchange_remote "${keyexchange_key}")"
+
+  remote "${keyexchange_server}" keyexchange_remote "${keyexchange_key}" ||
+    fatal "Could not complete key exchange."
 
   # Command succeeded?
   if [ $? = 0 ]; then
@@ -3145,6 +3363,8 @@ function delserver_command {
 # USER COMMAND: update
 #---------------------
 
+update_DEPS="wget"
+
 function update_shorthelp {
   echo "Update Drupal project information from updates.drupal.org."
 }
@@ -3182,8 +3402,6 @@ function update_command {
 #-------------------
 
 help_DEPS="tr fmt"
-package_Cygwin_tr="coreutils"
-package_Cygwin_fmt="coreutils"
 
 function help_shorthelp {
   echo "Display a help message."
@@ -3227,10 +3445,42 @@ function package_Cygwin {
   echo " - Please use Cygwin setup.exe to install package \"$*\"."
 }
 
+function packagecheck_Cygwin {
+  prog _ "$1"
+}
+
 # Package manager function for Ubuntu.
 function package_Ubuntu {
-  sudo apt-get install "$*"
+  runlongprivileged "Installing $1" apt-get install "$1"
 }
+
+function packagecheck_Ubuntu {
+  dpkg --get-selections | grep -q "^$1[[:space:]]*install$" >/dev/null
+}
+
+# Package manager function for CentOS.
+function package_CentOS {
+  runlongprivileged "Installing $1" yum -y -q install "$1"
+}
+
+# Package test function for CentOS.
+function packagecheck_CentOS {
+  yum list installed "$1" >/dev/null 2>&1
+}
+
+# CentOS core packages.
+package_CentOS_dd=coreutils
+package_CentOS_od=coreutils
+package_CentOS_tee=coreutils
+package_CentOS_cat=coreutils
+package_CentOS_ssh=openssh-clients
+package_CentOS_awk=gawk
+package_CentOS_grep=grep
+package_CentOS_sed=sed
+package_CentOS_tbl=groff-base
+package_CentOS_groff=groff-base
+package_CentOS_tr=coreutils
+package_CentOS_xargs=findutils
 
 #------------------------------------------------------------------------------
 # Initialization.
@@ -3244,9 +3494,37 @@ declare -a commands
 declare invalid_commands
 SED="sed" # needed because ns uses it, will be replaced in deps processing.
 
-prog LSB_RELEASE lsb_release && OS="$(${LSB_RELEASE} -si)" || OS="$(uname -o)"
+prog _LSB_RELEASE lsb_release
+prog _YUM yum
+prog _APTGET apt-get
 
-PM_INSTALL=$(ns package_ $OS)
+if [ -n "${_LSB_RELEASE}" ]; then
+  OS="$(${_LSB_RELEASE} -si)"
+else
+  _uname="$(uname -o)"
+  [ "${_uname}" = "Cygwin" ] && OS="Cygwin"
+  if [ "${_uname}" != "Cygwin" ] && [ -n "${_YUM}" ]; then
+    echo
+    paragraph <<< "The program lsb_release was not found on ${HOSTNAME}. This program is used to make more inteligent decisions while working in environemnt on ${HOSTNAME}. The yum package manager was found, if you want we can attempt to run 'sudo yum install redhat-lsb-core'."
+    ynprompt v "Press y to install 'redhat-lsb-core' or n to cancel and supply lsb_release a different way."
+    if [ "${v}" = "y" ]; then
+      if runlongprivileged "Installing redhat-lsb-core" yum -y -q install redhat-lsb-core; then
+        prog _LSB_RELEASE lsb_release
+        OS="$(${_LSB_RELEASE} -si)"
+      else
+        fatal "Could not install approriate lsb_release binary. Please consult your OS documentation to find and install /usr/bin/lsb_release."
+      fi
+    else
+      fatal "Opreation cencelled by user."
+    fi
+  fi
+  #if [ "${_uname}" != "Cygwin" ] && [ -n "${_APTGET}" ]; then
+  #fi
+fi
+#&& OS="$(${_LSB_RELEASE} -si)" || OS="$(uname -o)"
+
+declare -r PM_INSTALL=$(ns package_ $OS)
+declare -r PM_CHECK=$(ns packagecheck_ ${OS})
 
 # This and the -i switch in the hashbang at the top of the file are necessary
 # to read COLUMNS shell var.
@@ -3288,43 +3566,65 @@ for command_and_args in "${commands[@]}"; do
   command="${acommand[0]}"
   command_DEPS=$(ns $command _DEPS)
   if [ -n "${!command_DEPS}" ]; then
-    [ -n "${deps}" ] && deps+=" "
-    deps+="${!command_DEPS}"
+    deps+=" ${!command_DEPS}"
   fi
 done
+deps="$(xargs -n1 <<< "${deps}" | sort -u | xargs)"
 
-# Find missing deps.
+# Find packages for dep programs.
+declare packages
+for dep in ${deps}; do
+  packagefield=$(ns package_ $OS _ $dep)
+  if [ -n "${!packagefield}" ]; then
+    packages+=" ${!packagefield}"
+  else
+    packages+=" ${dep}"
+  fi
+done
+packages="$(xargs -n1 <<< "${packages}" | sort -u | xargs)"
+
+# Find missing packages.
 declare missing
-for dep in "${deps[@]}"; do
-  prog DEP $dep || missing+="$dep "
+for package in ${packages}; do
+  if func ${PM_CHECK}; then
+    ${PM_CHECK} "${package}" || missing+="${package} "
+  else
+    prog _ "${package}" || missing+="${package} "
+  fi
 done
 
 # Process missing deps.
 if [ -n "$missing" ]; then
 
-  echo -e "\nMissing tools..."
+  echo -e "\nMissing tools: ${missing}"
 
-  # Gather info about the tool packages.
-  unset packages
-  for item in $missing; do
-    package=$(ns package_ $OS _ $item)
-    if [ -z "${!package}" ] || ! func ${PM_INSTALL}; then
-      echo " - $item: no suggestion on how to install, sorry"
-      continue
+  # prepackage functions
+  for package in ${missing}; do
+    f="$(ns prepackage_ "${OS}" _ "${package}")"
+    if func "${f}"; then
+      ${f} ${package} || fatal "Could not preprocess package \"${package}\"."
     fi
-    packages+="${!package}"
   done
 
   # Run package manager.
-  packages=`echo "$packages" | xargs -n1 | sort -u | xargs` # unique, sorted
-  for package in $packages; do
+  echo "Installing packages: ${missing}"
+  for package in ${missing}; do
     ${PM_INSTALL} ${package}
   done
 
   # Did that solve it?
   unset still_missing
+  declare satisfied=( )
   for item in $missing; do
-    prog DEP $item || still_missing+="$item "
+    prog DEP "${item}" &&
+      satisfied[${#satisfied[@]}]="$item" ||
+      still_missing+="$item "
+  done
+
+  # postpackage functions
+  for package in "${satisfied[@]}"; do
+    f="$(ns postpackage_ "${OS}" _ "${package}")"
+    func "${f}" && ${f} ${package}
   done
 
   # Report.
@@ -3352,7 +3652,7 @@ unset missing
   fatal "Could not create temporary directory, exiting."
 echo "TESTVALUE" > "$TEMPDIR/writecheck"
 [ -f "$TEMPDIR/writecheck" ] &&
-  grep "TESTVALUE" "$TEMPDIR/writecheck" >> /dev/null &&
+  grep "TESTVALUE" "$TEMPDIR/writecheck" >/dev/null &&
   rm "$TEMPDIR/writecheck" ||
   fatal "Could not write to temporary directory, exiting."
 
