@@ -13,7 +13,7 @@ declare -r HOSTNAME="$(hostname)"
 declare -r SCRIPTHOME="$HOME/.ddo"
 declare -r SCRIPTPATH="$0"
 declare -r USER_COMMANDS="init init7 init8 servers addserver modserver delserver update help keyexchange"
-declare -r SERVER_COMMANDS="uname init_vhost keyexchange_remote apache2_init php5_init mysql_scan"
+declare -r SERVER_COMMANDS="uname os init_vhost keyexchange_remote apache2_init php5_init mysql_scan"
 declare -r DEPS="dd od tee cat ssh awk grep sed tbl groff tr xargs"
 
 # $PROGRAM
@@ -246,7 +246,7 @@ function sshcmd {
   local sshcmd_options=( $(get SSH_OPTIONS) )
   local -a args
   args[${#args[@]}]="-q"
-  #args[${#args[@]}]="-C"
+  args[${#args[@]}]="-C"
   args[${#args[@]}]="-t"
   if [ -f "${sshcmd_identity}" ]; then
     args[${#args[@]}]="-i"
@@ -303,8 +303,102 @@ function remote {
   local -r remote_options="$(get "$(ns "${remote_server}" _sshopts)")"
   local -r remote_user="$(get "$(ns "${remote_server}" _user)")"
   local -r remote_host="$(get "$(ns "${remote_server}" _host)")"
+  [ -f "${OUTPUT}" ] && local -r out="${OUTPUT}" || local -r out="/dev/null"
   IDENTITY_FILE="${remote_identity}" SSH_OPTIONS="${remote_options}" \
-    sshcmd "${remote_host}" "${remote_user}" --remote "$@"
+    sshcmd "${remote_host}" "${remote_user}" --remote "$@" |
+      tee >(grep '^\+' | sed 's/^+[[:space:]]*//g' >> "${out}") |
+      _remotefitler
+}
+
+# TODO: Documentation.
+function _remotefitler {
+  local c
+  # Modes: 0 - line start; 1 - printable char; 2 - ignorable output.
+  local mode=0
+  while IFS="" read -r -n1 -d '' c; do
+    case "${mode}" in
+
+      # Mode: 0 - line start
+      0)
+        if [ "${c}" = '+' ]; then
+          # Line started with '+' so ignore it.
+          mode=2
+        else
+          mode=1
+          _remotechar "${c}"
+        fi
+      ;;
+
+      # Mode: 1 - printable lines =.
+      1) _remotechar "${c}" ;;
+
+    esac
+
+    # Newline character, reset mode.
+    [ "${c}" = $'\n' ] && mode=0
+
+  done
+}
+
+# TODO: Documentation.
+function _remotechar {
+  if [ "$1" = $'\n' ]; then
+    printf $'\n\r'
+  else
+    printf '%b' "$1"
+  fi
+}
+
+# TODO: Documentation.
+function remotequery {
+  local -r file="$1"; shift
+  local -r metadatavar="$1"; shift
+  local -r contentvar="$1"; shift
+  local query="^"
+  while [ -n "$1" ]; do
+    query+="$1"
+    query+='[[:space:]]\+'
+    shift
+  done
+  local -r linenum="$(grep -n -m 1 "${query}" "${file}" | cut -d: -f1)"
+  local -r line="$(grep -m 1 "${query}" "${file}")"
+  [ -z "${line}" ] && return 1
+  sed -i.x -e "${linenum}d" "${file}"
+  read -a "${metadatavar}" <<< "$(sed 's/\(.*\)--[^$]*$/\1/g' <<< ${line})"
+  export ${contentvar}="$(sed 's/.*-- \([^$]*\)$/\1/g' <<< ${line})"
+  return 0
+}
+
+# TODO: Documentation.
+function receivefile {
+
+  local -a meta
+  local content
+  local -r outf="$(tempfile)"
+  local -r fieldname="$1"
+  local -r tempfilevar="$2"
+  local -r filenamevar="$3"
+
+  # Fetch the data.
+  remotequery "${output}" meta content file "${fieldname}" || return 1
+
+  # Decode file.
+  base64 -d <<< "${content}" > "${outf}"
+
+  # Check that file lengths match.
+  local -ri rlen="${meta[3]}"
+  local -ri llen="$(wc -c "${outf}" | sed 's/[[:space:]]\+[^$]\+$//g')"
+  [ ${rlen} != ${llen} ] && return 2
+
+  # Check that file hashes match.
+  local -r rhash="${meta[4]}"
+  local -r lhash="$(sha256sum "${outf}" | sed 's/[[:space:]]\+[^$]\+$//g')"
+  [ "${rhash}" != "${lhash}" ] && return 2
+
+  # Output.
+  export ${tempfilevar}="${outf}"
+  export ${filenamevar}="${meta[2]}"
+  return 0
 }
 
 # -----------------------
@@ -929,7 +1023,7 @@ function runlong() {
   local -r out="$(tempfile)"
   local -r err="$(tempfile)"
   local n=0
-  printf '%s... ' "${label}"
+  [ -n "${label}" ] && printf '%s... ' "${label}"
   "$@" 1> "${out}" 2> "${err}" &
   pid=$!
   printf '%s' $'\e[?25l' # Hide text cursor.
@@ -946,10 +1040,11 @@ function runlong() {
   wait ${pid}
   local -i result=$?
   if [ ${result} = 0 ]; then
-    printf $'[OK]\n'
+    printf $'[OK]'
   else
-    printf $'%s\n' "[$(cat "${err}")]"
+    printf $'%s' "[$(cat "${err}")]"
   fi
+  printf $'\n'
   rm "${out}"
   rm "${err}"
   return ${result}
@@ -980,9 +1075,11 @@ function runlong() {
 function runlongprivileged {
   local -r label="$1"; shift
   printf $'\n'
-  if ! privileged --runraw runlong "${label}" "$@"; then
+  if privileged --runraw runlong "${label}" "$@"; then
+    printf $'\n'
+  else
     privileged --runelevated true
-    runlong "${label}" privileged --runelevated "$@"
+    runlong "${label} [elevated]" privileged --runelevated "$@"
   fi
 }
 
@@ -1010,8 +1107,66 @@ function runlongprivileged {
 #
 function fatal {
   local -r exitcode=$(get EXITCODE 1)
-  echo -e "$*" | MARGIN="0" paragraph > /dev/stderr
+  _send fatal "${FUNCNAME[1]}" "/dev/stderr" "$@"
   exit "${exitcode}"
+}
+
+# TODO documentation.
+function warning {
+  _send warn "${FUNCNAME[1]}" "/dev/stdout" "$@"
+}
+
+# TODO documentation.
+function message {
+  _send info "${FUNCNAME[1]}" "/dev/stdout" "$@"
+}
+
+# TODO documentation.
+function sendfile {
+  local -r data="$(base64 -w 0 "$1")"
+  local -r name="$(basename "$1")"
+  local -r len="$(wc -c "$1" | sed 's/[[:space:]]\+[^$]\+$//g')"
+  local -r hash="$(sha256sum "$1" | sed 's/[[:space:]]\+[^$]\+$//g')"
+  _send file "${FUNCNAME[1]}" "/dev/stdout" \
+    "${name}" "${len}" "${hash}" "${data}"
+}
+
+# TODO documentation.
+function _send {
+
+  local -r type="$1"; shift
+  local -r callerfunc="$1"; shift
+  local -r dest="$1"; shift
+  local args=( )
+  local message=""
+  local srcf item
+
+  # Set srcf, the calling source.
+  if [ -n "${PROCESSING_COMMAND}" ]; then
+    # Prefer PROCESSING_COMMAND
+    srcf="${PROCESSING_COMMAND}"
+  else
+    # Else use callerfunc from message/warning/fatal.
+    [ -n "${callerfunc}" ] && srcf="${callerfunc}"
+  fi
+  # Else this is a core message.
+  [ -z "${srcf}" ] || [ "${srcf}" = "${PROGRAM}" ] && srcf="core"
+
+  # Parse out the arguments.
+  args[${#args[@]}]="${type}"
+  args[${#args[@]}]="${srcf}"
+  while [ -n "$1" ]; do
+    item="$1"
+    shift
+    [ -z "$1" ] && message="${item}" || args[${#args[@]}]="${item}"
+  done
+
+  # Write the message to approriate output channel.
+  if [ ${REMOTE:?} = 0 ]; then
+    printf '%s\n' "${message}" | MARGIN="0" paragraph >> "${dest}"
+  else
+    printf '%s\n' "+ ${args[*]} -- ${message}" >> "${dest}"
+  fi
 }
 
 # ------------------------
@@ -1182,8 +1337,8 @@ EOF
 #
 function prompt {
   # TODO better result regex handling? do we need it? and docs for it.
-  resultvar=$1
-  message=$2
+  local -r resultvar=$1
+  local -r msg=$2
   shift; shift
   result=""
   local -a args
@@ -1192,11 +1347,11 @@ function prompt {
   if [ -n "$*" ]; then
     while [[ ! "$@" =~ (^| )"$result"($| ) ]]; do
       # shellcheck disable=SC2094
-      read -r "${args[@]}" -ep "$message: " result < "${TTY}" >> "${TTY}"
+      read -r "${args[@]}" -ep "${msg}: " result < "${TTY}" >> "${TTY}"
     done
   else
     # shellcheck disable=SC2094
-    read -r "${args[@]}" -ep "$message: " result < "${TTY}" >> "${TTY}"
+    read -r "${args[@]}" -ep "${msg}: " result < "${TTY}" >> "${TTY}"
   fi
   [ -n "${SILENT}" ] && echo
   export ${resultvar}="${result}"
@@ -2483,13 +2638,16 @@ function radinit {
 # SERVER COMMAND: uname
 #----------------------
 
-function uname_preflight {
-  return 0
+function uname_command {
+  message "$(uname -a)"
 }
 
-function uname_command {
-  uname -a
-  return 0
+#-------------------
+# SERVER COMMAND: os
+#-------------------
+
+function os_command {
+  message "${OS}"
 }
 
 #-----------------------------
@@ -2610,7 +2768,8 @@ function keyexchange_remote_command {
 
   # Is this key already in authorized_keys?
   if [ ${keyexchange_file_haskey:?} != 0 ]; then
-    echo "Key is already in file ${keyexchange_file:?} on ${HOSTNAME}, skipping."
+    warning keyexchange \
+      "Key is already in file ${keyexchange_file:?} on ${HOSTNAME}, skipping."
     return 0
   fi
 
@@ -2620,7 +2779,7 @@ function keyexchange_remote_command {
     echo "${key}" >> "${keyexchange_file:?}"
     ${GREP:?} "${keyexchange_pubkey:?}" "${keyexchange_file:?}" >/dev/null ||
       fatal "Could not add key to file ${keyexchange_file:?}."
-    echo "Added key to ${keyexchange_file:?} on ${HOSTNAME}."
+    message "Added key to ${keyexchange_file:?} on ${HOSTNAME}."
   else
     # No existing file, create a new one.
     if [ ! -d "${dir}" ]; then
@@ -2634,7 +2793,7 @@ function keyexchange_remote_command {
     chmod 0600 "${keyexchange_file:?}"
     ${GREP:?} "${keyexchange_pubkey:?}" "${keyexchange_file:?}" >/dev/null ||
       fatal "Could not add key to file ${keyexchange_file:?}."
-    echo "Created ${keyexchange_file:?} on ${HOSTNAME}."
+    message "Created ${keyexchange_file:?} on ${HOSTNAME}."
   fi
 }
 
@@ -3012,6 +3171,7 @@ function addserver_command {
 
   # Offer key exchange if the server is requiring a password.
   unset exchange_args
+  local remote_commands=( )
   local exchange_results="[NOT NEEDED]"
   if ssh_pw_required "${host}" "${serveruser}" "${identity}" "${opts}"; then
     echo
@@ -3023,46 +3183,59 @@ function addserver_command {
       skip this now and run \`${PROGRAM} keyexchange\` later to exchange keys.
 EOF
     # Do key exchange if requested.
+    local key=""
     if ynprompt v "Exchange public key with host ${host}?"; then
-      keyexchange "${addserver_alias}"
+      keyexchange_force_server="${addserver_alias}" keyexchange key
+      remote_commands[${#remote_commands[@]}]="--"
+      remote_commands[${#remote_commands[@]}]="keyexchange_remote"
+      remote_commands[${#remote_commands[@]}]="${key}"
     fi
   fi
 
-  # Test remote.
-  echo
-  printf "Testing remote access... "
-  if remoteuname="$(remote "$addserver_alias" uname)"; then
-    printf $'[OK]\n'
-  else
-    printf $'[ERROR]\n'
-    rm -f "$file"
-    fatal "Can't reach server, please check settings and try again."
-  fi
+  # Remote system info.
+  remote_commands[${#remote_commands[@]}]="--"
+  remote_commands[${#remote_commands[@]}]="uname"
+  remote_commands[${#remote_commands[@]}]="--"
+  remote_commands[${#remote_commands[@]}]="os"
 
   # Init remote.
-  printf "Initialzing ${addserver_httpdtype} server... "
   case "${addserver_httpdtype}" in
     "apache2")
-      remote "${addserver_alias}" apache2_init "${addserver_httpdconf}" -- php5_init &&
-        printf "${result}"$' [OK]\n' || printf $'[ERROR]\n'
+      remote_commands[${#remote_commands[@]}]="--"
+      remote_commands[${#remote_commands[@]}]="apache2_init"
+      remote_commands[${#remote_commands[@]}]="${addserver_httpdconf}"
+      # TODO separate php5
+      remote_commands[${#remote_commands[@]}]="--"
+      remote_commands[${#remote_commands[@]}]="php5_init"
     ;;
     "nginx")
       # TODO nginx support.
     ;;
   esac
 
+  local output="$(tempfile)"
+  OUTPUT="${output}" remote "${addserver_alias}" "${remote_commands[@]}"
+
+  local -a meta
+  local remoteuname remoteos
+  remotequery "${output}" meta remoteos info os ||
+    fatal "Can't get remote OS."
+  remotequery "${output}" meta remoteuname info uname ||
+    fatal "Can't get remote uname."
+
   # Report success.
   echo
   FORMAT="rblx" MARGIN="3" HEADER_FORMAT="lb" ROWSPACING="1" tableformat <<EOF
     Add new server
     _
-    alias          | ${addserver_alias}
-    user           | ${serveruser}
-    host           | ${host}
-    system         | ${remoteuname}
-    identity file  | $(get identity "[NOT SET]")
-    options        | $(get opts "[NOT SET]")
-    key exchange   | ${exchange_results}
+    alias            | ${addserver_alias}
+    user             | ${serveruser}
+    host             | ${host}
+    operating system | ${remoteos}
+    system info      | ${remoteuname}
+    identity file    | $(get identity "[NOT SET]")
+    options          | $(get opts "[NOT SET]")
+    key exchange     | ${exchange_results}
 EOF
   MARGIN="3" paragraph <<EOF
     _
@@ -3135,7 +3308,6 @@ function keyexchange_keyfile_prompt {
     radioprompt keyexchange_keyfile \
       "Select file or press [ENTER] to confirm selection" "$2" <<< "${config}"
   fi
-  echo "keyexchange_keyfile=${selected_value} (${selected_label})"
   export keyexchange_keyfile_label="${selected_label}"
   [ -z "${keyexchange_keytype}" ] &&
     keyexchange_keytype_prompt keyexchange_keytype \
@@ -3313,14 +3485,14 @@ function keyexchange_command {
   fi
 }
 
-# -------------------
-# keyexchange(server)
-# -------------------
+# ---------------------
+# keyexchange(keyfield)
+# ---------------------
 # Argument based key exchange utility. TODO better docs.
 function keyexchange {
-  keyexchange_force_server="$1"
+  # TODO avoid the loadserver in keyexchange_preflight
   keyexchange_preflight
-  keyexchange_command
+  export $1="${keyexchange_key}"
 }
 
 #------------------------
@@ -3591,8 +3763,6 @@ done
 # Process missing deps.
 if [ ${#missing[@]} -gt 0 ]; then
 
-  echo "Installing missing packages: ${missing[*]}"
-
   # prepackage functions
   for package in ${missing[@]}; do
     f="$(ns prepackage_ "${OS}" _ "${package}")"
@@ -3620,11 +3790,10 @@ if [ ${#missing[@]} -gt 0 ]; then
   done
 
   # Report.
-  echo
   if [ -n "$still_missing" ]; then
     fatal "Could not automatically resolve the following missing tools: $still_missing"
   else
-    echo "Automatically resolved missing deps: ${satisfied[*]}."
+    message "Resolved missing packages: ${satisfied[*]}."
   fi
 fi
 
@@ -3675,7 +3844,7 @@ for command_and_args in "${commands[@]}"; do
   for preflightfn in ${preflightfns[@]}; do
     func ${preflightfn} || continue
     unset PREFLGHT_ERROR
-    ${preflightfn} "${args[@]}"
+    PROCESSING_COMMAND="${command}" ${preflightfn} "${args[@]}"
     result=$?
     flightcheck=$(( $flightcheck | $result ))
     [ $result ] && [ -n "$PREFLGHT_ERROR" ] && PREFLIGHT_ERRORS[${#PREFLIGHT_ERRORS[@]}]="$PREFLGHT_ERROR"
@@ -3684,7 +3853,7 @@ for command_and_args in "${commands[@]}"; do
   done
 done
 if [ $flightcheck != 0 ]; then
-  echo "${PREFLIGHT_ERRORS[*]}"
+  #echo "${PREFLIGHT_ERRORS[*]}"
   fatal "Did not pass preflight checks: ${PREFLIGHT_ERRORS[*]}" # TODO list ERRORs
 fi
 
@@ -3692,11 +3861,12 @@ fi
 for command_and_args in "${commands[@]}"; do
   eval "aargs=( ${command_and_args} )"
   command="${aargs[0]}"
+  PROCESSING_COMMAND="${command}"
   args=( "${aargs[@]:1}" )
   commandfns=( $(ns $command _command _ $OS) $(ns $command _command) )
   for commandfn in ${commandfns[@]}; do
     func ${commandfn} || continue
-    ${commandfn} "${args[@]}"
+    PROCESSING_COMMAND="${command}" ${commandfn} "${args[@]}"
     break; # Only invoke 1 version of command func.
   done
 done
