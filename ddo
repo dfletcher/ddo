@@ -1042,7 +1042,8 @@ function runlong() {
   if [ ${result} = 0 ]; then
     printf $'[OK]'
   else
-    printf $'%s' "[$(cat "${err}")]"
+    local errmsg="$(cat "${err}")"
+    [ -n "${errmsg}" ] && printf $'[%s]' "${errmsg}"
   fi
   printf $'\n'
   rm "${out}"
@@ -2683,9 +2684,11 @@ function apache2_init_command {
 
 php5_init_DEPS="php"
 package_Ubuntu_php="php5"
-package_CentOS_php="php php-gd php-ldap php-odbc php-pear php-xml php-xmlrpc php-mbstring php-snmp php-soap curl libcurl-devel"
+package_CentOS_php="php php-gd php-ldap php-odbc php-pear php-xml php-xmlrpc php-mbstring php-snmp php-soap curl libcurl-devel php-devel gcc automake autoconf m4 libtool"
 
 function postpackage_CentOS_php {
+  yes '' | runlongprivileged "pecl install APC" pecl install APC
+  printf $'extension=apc.so\n' | privileged --runelevated tee /etc/php.d/apc.ini >/dev/null
   privileged systemctl restart httpd.service
 }
 
@@ -3490,8 +3493,18 @@ function keyexchange_command {
 # ---------------------
 # Argument based key exchange utility. TODO better docs.
 function keyexchange {
-  # TODO avoid the loadserver in keyexchange_preflight
-  keyexchange_preflight
+  local keyfile keylabel
+  local keytypes=( rsa dsa )
+  for k in "${keytypes[@]}"; do
+    if [ -f ~/.ssh/id_${k}.pub ]; then
+      keyfile="${k}"
+      keylabel="id_${k}.pub"
+      break
+    fi
+  done
+  keyexchange_keyfile="${keyfile}" \
+  keyexchange_keyfile_label="${keylabel}" \
+    keyexchange_preflight
   export $1="${keyexchange_key}"
 }
 
