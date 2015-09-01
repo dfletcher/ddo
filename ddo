@@ -1024,7 +1024,7 @@ function runlong() {
   local -r err="$(tempfile)"
   local n=0
   [ -n "${label}" ] && printf '%s... ' "${label}"
-  "$@" 1> "${out}" 2> "${err}" &
+  "$@" </dev/stdin 1> "${out}" 2> "${err}" &
   pid=$!
   printf '%s' $'\e[?25l' # Hide text cursor.
   while ps -p ${pid} >/dev/null; do
@@ -2691,10 +2691,12 @@ function postpackage_CentOS_php {
     privileged --runraw pecl install APC ||
       yes '' | runlong "Installing APC [elevated]" \
         privileged --runelevated pecl install APC
-  printf $'extension=apc.so\n' |
-    runlong "Installing apc.ini" privileged --runraw tee /etc/php.d/apc.ini >/dev/null ||
-      printf $'extension=apc.so\n' |
-        runlong "Installing apc.ini" privileged --runelevated tee /etc/php.d/apc.ini >/dev/null
+  printf $'extension=apc.so\n' | \
+    runlong "Installing apc.ini" \
+      privileged --runraw tee /etc/php.d/apc.ini ||
+        printf $'extension=apc.so\n' |
+          runlong "Installing apc.ini [elevated]" \
+            sudo tee /etc/php.d/apc.ini
   runlongprivileged "Restarting Apache" systemctl restart httpd.service
 }
 
