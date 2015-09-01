@@ -2687,9 +2687,15 @@ package_Ubuntu_php="php5"
 package_CentOS_php="php php-gd php-ldap php-odbc php-pear php-xml php-xmlrpc php-mbstring php-snmp php-soap curl libcurl-devel php-devel gcc automake autoconf m4 libtool"
 
 function postpackage_CentOS_php {
-  yes '' | runlongprivileged "pecl install APC" pecl install APC
-  printf $'extension=apc.so\n' | privileged --runelevated tee /etc/php.d/apc.ini >/dev/null
-  privileged systemctl restart httpd.service
+  yes '' | runlong "Installing APC" \
+    privileged --runraw pecl install APC ||
+      yes '' | runlong "Installing APC [elevated]" \
+        privileged --runelevated pecl install APC
+  printf $'extension=apc.so\n' |
+    runlong "Installing apc.ini" privileged --runraw tee /etc/php.d/apc.ini >/dev/null ||
+      printf $'extension=apc.so\n' |
+        runlong "Installing apc.ini" privileged --runelevated tee /etc/php.d/apc.ini >/dev/null
+  runlongprivileged "Restarting Apache" systemctl restart httpd.service
 }
 
 function php5_init_command {
