@@ -1170,6 +1170,59 @@ function _send {
   fi
 }
 
+# TODO documentation.
+function package_install {
+
+  local promptmsg package f
+  local -r incompletevar="$1"; shift
+  local complete=( )
+  local incomplete=( )
+  local -r args=( "$@" )
+  local -ri nothers=$((${#args[@]}-1))
+  export ${incompletevar}=""
+  [ $# = 0 ] && return 0 # No packages to process.
+
+  # prepackage functions
+  for package in "$@"; do
+    f="$(ns prepackage_ "${OS}" _ "${package}")"
+    if func "${f}"; then
+      ${f} ${package} || fatal "Could not preprocess package \"${package}\"."
+    fi
+  done
+
+  # Prompt.
+  case $# in
+    0) promptmsg="Nothing to install" ;;
+    1) promptmsg="Installing $1" ;;
+    2) promptmsg="Installing $1, $2" ;;
+    *) printf -v promptmsg \
+       'Installing %s and %d others' "$1" "${nothers}" ;;
+  esac
+  printf $'\n'
+  [ $# -gt 2 ] && MARGIN="10" paragraph <<< $'Installing\n'"$*"
+
+  # Run package manager.
+  PROMPT="${promptmsg}" ${PM_INSTALL} "$@"
+
+  # Test what we installed.
+  for item in ${missing[@]}; do
+    ${PM_CHECK} "${item}" &&
+      complete[${#complete[@]}]="${item}" ||
+      incomplete[${#incomplete[@]}]="${item}"
+  done
+
+  # postpackage functions
+  for package in "${complete[@]}"; do
+    f="$(ns postpackage_ "${OS}" _ "${package}")"
+    func "${f}" && ${f} ${package}
+  done
+
+  # Notify and return.
+  message "Installed packages: ${complete[*]}."
+  export ${incompletevar}="${incomplete[*]}"
+  return 0
+}
+
 # ------------------------
 # longhelp(command, usage)
 # ------------------------
@@ -2686,17 +2739,27 @@ php5_init_DEPS="php"
 package_Ubuntu_php="php5"
 package_CentOS_php="php php-gd php-ldap php-odbc php-pear php-xml php-xmlrpc php-mbstring php-snmp php-soap curl libcurl-devel php-devel gcc automake autoconf m4 libtool"
 
+function php5_pecl {
+  local -r pkg="$1"
+  local -r inid="$2"
+  local -r inic="$3"
+  local -r inif="${inid}/${pkg}.ini"
+  local -r prompt="Installing ${inif}"
+  yes '' | runlong "Installing ${pkg}" \
+    privileged --runraw pecl install "${pkg}" ||
+      yes '' | runlong "Installing ${pkg} [elevated]" \
+        privileged --runelevated pecl install "${pkg}"
+  if [ -d "${inid}" ]; then
+    printf '%s' "${inic}" |
+      runlong "${prompt}" privileged --runraw tee "${inif}" ||
+    printf '%s' "${inic}" |
+      runlong "${prompt} [elevated]" privileged --runelevated tee "${inif}"
+  fi
+}
+
 function postpackage_CentOS_php {
-  yes '' | runlong "Installing APC" \
-    privileged --runraw pecl install APC ||
-      yes '' | runlong "Installing APC [elevated]" \
-        privileged --runelevated pecl install APC
-  printf $'extension=apc.so\n' | \
-    runlong "Installing apc.ini" \
-      privileged --runraw tee /etc/php.d/apc.ini ||
-        printf $'extension=apc.so\n' |
-          runlong "Installing apc.ini [elevated]" \
-            sudo tee /etc/php.d/apc.ini
+  php5_pecl apc /etc/php.d $'extension=apc.so\n'
+  php5_pecl uploadprogress /etc/php.d $'extension=uploadprogress.so\n'
   runlongprivileged "Restarting Apache" systemctl restart httpd.service
 }
 
@@ -3642,7 +3705,7 @@ function packagecheck_Cygwin {
 
 # Package manager function for Ubuntu.
 function package_Ubuntu {
-  runlongprivileged "Installing $1" apt-get install "$1"
+  runlongprivileged "${PROMPT}" apt-get install "$@"
 }
 
 function packagecheck_Ubuntu {
@@ -3651,7 +3714,7 @@ function packagecheck_Ubuntu {
 
 # Package manager function for CentOS.
 function package_CentOS {
-  runlongprivileged "Installing $*" yum -y -q install "$@"
+  runlongprivileged "${PROMPT}" yum -y -q install "$@"
 }
 
 # Package test function for CentOS.
@@ -3781,42 +3844,10 @@ for package in ${packages[@]}; do
   fi
 done
 
-# Process missing deps.
-if [ ${#missing[@]} -gt 0 ]; then
-
-  # prepackage functions
-  for package in ${missing[@]}; do
-    f="$(ns prepackage_ "${OS}" _ "${package}")"
-    if func "${f}"; then
-      ${f} ${package} || fatal "Could not preprocess package \"${package}\"."
-    fi
-  done
-
-  # Run package manager.
-  ${PM_INSTALL} ${missing[@]}
-
-  # Did that solve it?
-  unset still_missing
-  declare satisfied=( )
-  for item in ${missing[@]}; do
-    func ${PM_CHECK} && ${PM_CHECK} "${item}" &&
-      satisfied[${#satisfied[@]}]="$item" ||
-      still_missing+="$item "
-  done
-
-  # postpackage functions
-  for package in "${satisfied[@]}"; do
-    f="$(ns postpackage_ "${OS}" _ "${package}")"
-    func "${f}" && ${f} ${package}
-  done
-
-  # Report.
-  if [ -n "$still_missing" ]; then
-    fatal "Could not automatically resolve the following missing tools: $still_missing"
-  else
-    message "Resolved missing packages: ${satisfied[*]}."
-  fi
-fi
+declare -a unsatisfied
+package_install unsatisfied ${missing[@]}
+[ -n "${unsatisfied}" ] &&
+  fatal "Could not automatically resolve the following missing tools: ${unsatisfied}"
 
 # Process deps.
 prog _AWK awk # temp need for loop below.
